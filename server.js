@@ -184,7 +184,7 @@ app.post('/api/chat', async (req, res) => {
         const data = await response.json();
         console.log('📦 中转 API 返回的完整数据:', JSON.stringify(data).substring(0, 500));
 
-        // ===== 多种方式提取回复 =====
+        // ===== 提取回复 =====
         let reply = data.choices?.[0]?.message?.content ||
                     data.reply ||
                     data.result ||
@@ -195,10 +195,6 @@ app.post('/api/chat', async (req, res) => {
 
         console.log('✅ 提取的回复:', reply ? reply.substring(0, 50) + '...' : '空回复');
 
-        if (!reply || reply === '机走神了~') {
-            console.log('⚠️ 警告：回复为空或默认值，检查中转 API 返回格式');
-        }
-
         // 4. 存入 AI 回复
         await supabaseInsert('messages', {
             session_id: sid,
@@ -208,7 +204,15 @@ app.post('/api/chat', async (req, res) => {
         });
         console.log('✅ AI 回复已存入 Supabase');
 
-        res.json({ reply });
+        // ===== 返回 OpenAI 标准格式（Kelivo 能认）=====
+        res.json({
+            choices: [{
+                message: {
+                    role: 'assistant',
+                    content: reply
+                }
+            }]
+        });
 
     } catch (e) {
         console.log('❌ 错误:', e.message);
