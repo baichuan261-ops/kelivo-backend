@@ -1,23 +1,42 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-
-if (process.env.NODE_ENV !== 'production') {
-    require('dotenv').config();
-}
-
-console.log('🚀 服务启动中...');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(bodyParser.json({ limit: '100mb' }));
+console.log('🚀 服务启动中...');
 
+// ===== 手动处理跨域 =====
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+// ===== 手动解析 JSON =====
+app.use((req, res, next) => {
+    if (req.method === 'POST' || req.method === 'PUT') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            try {
+                req.body = body ? JSON.parse(body) : {};
+                next();
+            } catch (e) {
+                res.status(400).json({ error: '无效的 JSON' });
+            }
+        });
+    } else {
+        next();
+    }
+});
+
+// ===== Supabase REST API 操作 =====
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-// Supabase REST API 操作函数
 async function supabaseInsert(table, data) {
     const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
         method: 'POST',
@@ -35,9 +54,9 @@ async function supabaseInsert(table, data) {
     return response;
 }
 
-async function supabaseSelect(table, query) {
+async function supabaseSelect(table, params) {
     const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
-    Object.keys(query).forEach(key => url.searchParams.append(key, query[key]));
+    Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
     const response = await fetch(url, {
         method: 'GET',
         headers: {
@@ -53,10 +72,12 @@ async function supabaseSelect(table, query) {
     return { data };
 }
 
+// ===== 健康检查 =====
 app.get('/', (req, res) => {
     res.json({ status: 'ok', message: 'Kelivo 后端运行中 💖' });
 });
 
+// ===== 核心聊天接口 =====
 app.post('/api/chat', async (req, res) => {
     try {
         const { message, sessionId } = req.body;
@@ -107,6 +128,7 @@ app.post('/api/chat', async (req, res) => {
         const TRANSFER_API_KEY = process.env.TRANSFER_API_KEY;
 
         if (!TRANSFER_API_URL || !TRANSFER_API_KEY) {
+            console.log('❌ 中转 API 未配置');
             return res.status(500).json({ error: '中转 API 未配置' });
         }
 
@@ -168,6 +190,8 @@ app.post('/api/chat', async (req, res) => {
     }
 });
 
+// ===== 启动 =====
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 服务已启动，端口: ${PORT}`);
+    console.log(`📍 健康检查: http://localhost:${PORT}/`);
 });
