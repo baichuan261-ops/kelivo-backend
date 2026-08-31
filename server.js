@@ -1,8 +1,8 @@
 const express = require('express');
+const bodyParser = require('body-parser');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 
-// 只在本地开发时加载 .env 文件
 if (process.env.NODE_ENV !== 'production') {
     require('dotenv').config();
 }
@@ -13,7 +13,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+app.use(bodyParser.json({ limit: '100mb' }));
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -32,7 +32,6 @@ app.post('/api/chat', async (req, res) => {
         }
         const sid = sessionId || 1;
         
-        // 存用户消息
         await supabase.from('messages').insert({ 
             session_id: sid, 
             role: 'user', 
@@ -40,7 +39,6 @@ app.post('/api/chat', async (req, res) => {
             visible: true 
         });
         
-        // 拉最近10条消息
         const { data: history } = await supabase
             .from('messages')
             .select('role, content')
@@ -54,7 +52,6 @@ app.post('/api/chat', async (req, res) => {
             `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`
         ).join('\n');
         
-        // 调用中转 API
         const response = await fetch(process.env.TRANSFER_API_URL, {
             method: 'POST',
             headers: {
