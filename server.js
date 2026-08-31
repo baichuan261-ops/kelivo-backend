@@ -38,38 +38,48 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
 async function supabaseInsert(table, data) {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`
-        },
-        body: JSON.stringify(data)
-    });
-    if (!response.ok) {
-        const error = await response.text();
-        console.log('⚠️ Supabase 插入失败:', error);
+    try {
+        const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`
+            },
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) {
+            const error = await response.text();
+            console.log('⚠️ Supabase 插入失败:', error);
+        }
+        return response;
+    } catch (e) {
+        console.log('⚠️ Supabase 插入异常:', e.message);
+        return null;
     }
-    return response;
 }
 
 async function supabaseSelect(table, params) {
-    const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
-    Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
-    const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-            'apikey': SUPABASE_KEY,
-            'Authorization': `Bearer ${SUPABASE_KEY}`
+    try {
+        const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+        Object.keys(params).forEach(key => url.searchParams.append(key, params[key]));
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`
+            }
+        });
+        if (!response.ok) {
+            console.log('⚠️ Supabase 查询失败:', await response.text());
+            return { data: [] };
         }
-    });
-    if (!response.ok) {
-        console.log('⚠️ Supabase 查询失败:', await response.text());
+        const data = await response.json();
+        return { data };
+    } catch (e) {
+        console.log('⚠️ Supabase 查询异常:', e.message);
         return { data: [] };
     }
-    const data = await response.json();
-    return { data };
 }
 
 // ===== 健康检查 =====
@@ -80,47 +90,48 @@ app.get('/', (req, res) => {
 // ===== 核心聊天接口 =====
 app.post('/api/chat', async (req, res) => {
     try {
-        const { message, sessionId } = req.body;
-        console.log('📩 收到消息:', message ? message.substring(0, 30) + '...' : '空');
+        console.log('📩 收到请求体:', JSON.stringify(req.body).substring(0, 200));
+
+        // 兼容多种字段名
+        const message = req.body.message || req.body.content || req.body.prompt || req.body.text || req.body.msg;
+        const sessionId = req.body.sessionId || req.body.session_id || 1;
+
+        console.log('📩 提取的消息:', message ? message.substring(0, 50) + '...' : '空');
 
         if (!message) {
-            return res.status(400).json({ error: '消息不能为空' });
+            return res.status(400).json({
+                error: '消息不能为空',
+                received: Object.keys(req.body)
+            });
         }
 
         const sid = sessionId || 1;
 
         // 1. 存入用户消息
-        try {
-            await supabaseInsert('messages', {
-                session_id: sid,
-                role: 'user',
-                content: message,
-                visible: true
-            });
-            console.log('✅ 用户消息已存入 Supabase');
-        } catch (e) {
-            console.log('⚠️ 存入失败:', e.message);
-        }
+        await supabaseInsert('messages', {
+            session_id: sid,
+            role: 'user',
+            content: message,
+            visible: true
+        });
+        console.log('✅ 用户消息已存入 Supabase');
 
         // 2. 拉取最近 10 条消息
         let context = '';
-        try {
-            const result = await supabaseSelect('messages', {
-                select: 'role,content',
-                session_id: `eq.${sid}`,
-                visible: 'eq.true',
-                order: 'created_at.desc',
-                limit: '10'
-            });
-            if (result.data && result.data.length > 0) {
-                const recent = result.data.reverse();
-                context = recent.map(m =>
-                    `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`
-                ).join('\n');
-                console.log(`📚 加载了 ${recent.length} 条历史消息`);
-            }
-        } catch (e) {
-            console.log('⚠️ 拉取历史失败:', e.message);
+        const result = await supabaseSelect('messages', {
+            select: 'role,content',
+            session_id: `eq.${sid}`,
+            visible: 'eq.true',
+            order: 'created_at.desc',
+            limit: '10'
+        });
+
+        if (result.data && result.data.length > 0) {
+            const recent = result.data.reverse();
+            context = recent.map(m =>
+                `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`
+            ).join('\n');
+            console.log(`📚 加载了 ${recent.length} 条历史消息`);
         }
 
         // 3. 调用中转 API
@@ -167,20 +178,16 @@ app.post('/api/chat', async (req, res) => {
         const data = await response.json();
         const reply = data.choices?.[0]?.message?.content || '机走神了~';
 
-        console.log('✅ 收到回复:', reply.substring(0, 30) + '...');
+        console.log('✅ 收到回复:', reply.substring(0, 50) + '...');
 
         // 4. 存入 AI 回复
-        try {
-            await supabaseInsert('messages', {
-                session_id: sid,
-                role: 'assistant',
-                content: reply,
-                visible: true
-            });
-            console.log('✅ AI 回复已存入 Supabase');
-        } catch (e) {
-            console.log('⚠️ 存入回复失败:', e.message);
-        }
+        await supabaseInsert('messages', {
+            session_id: sid,
+            role: 'assistant',
+            content: reply,
+            visible: true
+        });
+        console.log('✅ AI 回复已存入 Supabase');
 
         res.json({ reply });
 
@@ -193,5 +200,5 @@ app.post('/api/chat', async (req, res) => {
 // ===== 启动 =====
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 服务已启动，端口: ${PORT}`);
-    console.log(`📍 健康检查: http://localhost:${PORT}/`);
+    console.log(`📍 健康检查: https://my-ai-memory.onrender.com/`);
 });
