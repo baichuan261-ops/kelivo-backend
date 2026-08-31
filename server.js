@@ -1,7 +1,11 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
-require('dotenv').config();
+
+// 只在本地开发时加载 .env 文件
+if (process.env.NODE_ENV !== 'production') {
+    require('dotenv').config();
+}
 
 console.log('🚀 服务启动中...');
 
