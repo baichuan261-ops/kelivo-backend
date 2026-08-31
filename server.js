@@ -95,7 +95,6 @@ app.post('/api/chat', async (req, res) => {
         // ===== 提取消息（兼容多种格式）=====
         let message = req.body.message || req.body.content || req.body.prompt || req.body.text || req.body.msg;
 
-        // 如果都没有，尝试从 messages 数组里取最后一条 user 消息（Kelivo 的格式）
         if (!message && req.body.messages && Array.isArray(req.body.messages)) {
             const lastUserMsg = req.body.messages.filter(m => m.role === 'user').pop();
             if (lastUserMsg) message = lastUserMsg.content;
@@ -183,9 +182,22 @@ app.post('/api/chat', async (req, res) => {
         }
 
         const data = await response.json();
-        const reply = data.choices?.[0]?.message?.content || '机走神了~';
+        console.log('📦 中转 API 返回的完整数据:', JSON.stringify(data).substring(0, 500));
 
-        console.log('✅ 收到回复:', reply.substring(0, 50) + '...');
+        // ===== 多种方式提取回复 =====
+        let reply = data.choices?.[0]?.message?.content ||
+                    data.reply ||
+                    data.result ||
+                    data.content ||
+                    data.output ||
+                    data.response ||
+                    '机走神了~';
+
+        console.log('✅ 提取的回复:', reply ? reply.substring(0, 50) + '...' : '空回复');
+
+        if (!reply || reply === '机走神了~') {
+            console.log('⚠️ 警告：回复为空或默认值，检查中转 API 返回格式');
+        }
 
         // 4. 存入 AI 回复
         await supabaseInsert('messages', {
