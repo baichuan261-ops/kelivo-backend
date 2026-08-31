@@ -1,17 +1,17 @@
 {
   "name": "kelivo-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Kelivo 后端 - 带记忆压缩",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.4",
+    "body-parser": "^1.20.3",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1"
