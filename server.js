@@ -90,10 +90,17 @@ app.get('/', (req, res) => {
 // ===== 核心聊天接口 =====
 app.post('/api/chat', async (req, res) => {
     try {
-        console.log('📩 收到请求体:', JSON.stringify(req.body).substring(0, 200));
+        console.log('📩 收到请求体:', JSON.stringify(req.body).substring(0, 300));
 
-        // 兼容多种字段名
-        const message = req.body.message || req.body.content || req.body.prompt || req.body.text || req.body.msg;
+        // ===== 提取消息（兼容多种格式）=====
+        let message = req.body.message || req.body.content || req.body.prompt || req.body.text || req.body.msg;
+
+        // 如果都没有，尝试从 messages 数组里取最后一条 user 消息（Kelivo 的格式）
+        if (!message && req.body.messages && Array.isArray(req.body.messages)) {
+            const lastUserMsg = req.body.messages.filter(m => m.role === 'user').pop();
+            if (lastUserMsg) message = lastUserMsg.content;
+        }
+
         const sessionId = req.body.sessionId || req.body.session_id || 1;
 
         console.log('📩 提取的消息:', message ? message.substring(0, 50) + '...' : '空');
@@ -200,5 +207,4 @@ app.post('/api/chat', async (req, res) => {
 // ===== 启动 =====
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 服务已启动，端口: ${PORT}`);
-    console.log(`📍 健康检查: https://my-ai-memory.onrender.com/`);
 });
