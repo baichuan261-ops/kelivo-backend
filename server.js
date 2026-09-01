@@ -218,11 +218,10 @@ await supabaseInsert('timeline', {
     role: 'assistant', 
     content: replyContent
 });
-        // ---- 8. 返回 OpenAI 格式 ----
-        res.json({
-            choices: [{ message: { role: 'assistant', content: replyContent } }]
-        });
-
+      // --- 8. 返回给 Kelivo ---
+res.json({
+    reply: replyContent
+});
     } catch (e) {
         console.log('❌ 错误:', e.message);
         res.status(500).json({ error: e.message });
