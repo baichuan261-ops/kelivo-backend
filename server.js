@@ -220,6 +220,14 @@ await supabaseInsert('timeline', {
 });
       // --- 8. 返回给 Kelivo ---
 res.json({
+    choices: [
+        {
+            message: {
+                role: 'assistant',
+                content: replyContent
+            }
+        }
+    ],
     reply: replyContent
 });
     } catch (e) {
