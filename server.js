@@ -22,7 +22,6 @@ app.post('/api/chat', async (req, res) => {
     try {
         console.log('📩 收到请求体:', JSON.stringify(req.body).substring(0, 300));
 
-        // 提取消息
         let message = req.body.message || req.body.content || req.body.prompt || req.body.text || req.body.msg;
         if (!message && req.body.messages && Array.isArray(req.body.messages)) {
             const lastUser = req.body.messages.filter(m => m.role === 'user').pop();
@@ -35,7 +34,6 @@ app.post('/api/chat', async (req, res) => {
 
         console.log('📩 消息:', message);
 
-        // 调用中转 API
         const response = await fetch(process.env.TRANSFER_API_URL, {
             method: 'POST',
             headers: {
@@ -59,7 +57,17 @@ app.post('/api/chat', async (req, res) => {
 
         console.log('✅ 回复:', reply);
 
-        res.json({ reply });
+        res.json({
+            choices: [
+                {
+                    message: {
+                        role: 'assistant',
+                        content: reply
+                    }
+                }
+            ],
+            reply: reply
+        });
 
     } catch (e) {
         console.log('❌ 错误:', e.message);
