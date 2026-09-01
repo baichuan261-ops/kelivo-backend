@@ -204,7 +204,7 @@ ${context || '（这是第一次对话）'}
 
         const data = await response.json();
         let replyContent = data.choices?.[0]?.message?.content || '机走神了~';
-        console.log('✅ 回复:', reply.substring(0, 50) + '...');
+        console.log('✅ 回复:', replyContent.substring(0, 50) + '...');
 
         // ---- 7. 存 AI 回复 ----
        await supabaseInsert('messages', { 
