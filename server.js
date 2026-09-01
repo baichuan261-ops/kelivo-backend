@@ -207,8 +207,17 @@ ${context || '（这是第一次对话）'}
         console.log('✅ 回复:', reply.substring(0, 50) + '...');
 
         // ---- 7. 存 AI 回复 ----
-        await supabaseInsert('messages', { session_id: sid, role: 'assistant', content: reply, visible: true });
-
+       await supabaseInsert('messages', { 
+    session_id: sid, 
+    role: 'assistant', 
+    content: replyContent, 
+    visible: true 
+});
+await supabaseInsert('timeline', { 
+    session_id: sid, 
+    role: 'assistant', 
+    content: replyContent 
+});
         // ---- 8. 返回 OpenAI 格式 ----
         res.json({
             choices: [{ message: { role: 'assistant', content: reply } }]
