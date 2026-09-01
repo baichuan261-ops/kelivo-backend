@@ -128,8 +128,9 @@ app.post('/api/chat', async (req, res) => {
 
         console.log('📩 消息:', message.substring(0, 50) + '...');
 
-        // ---- 1. 存用户消息 ----
-        await supabaseInsert('messages', { session_id: sid, role: 'user', content: message, visible: true });
+      // --- 1. 存用户消息 ---
+await supabaseInsert('messages', { session_id: sid, role: 'user', content: message, visible: true });
+await supabaseInsert('timeline', { session_id: sid, role: 'user', content: message });
 
         // ---- 2. 拉取所有可见消息 ----
         const allResult = await supabaseSelect('messages', {
