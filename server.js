@@ -210,17 +210,17 @@ ${context || '（这是第一次对话）'}
        await supabaseInsert('messages', { 
     session_id: sid, 
     role: 'assistant', 
-    content: reply, 
+    content: replyContent, 
     visible: true 
 });
 await supabaseInsert('timeline', { 
     session_id: sid, 
     role: 'assistant', 
-    content: reply
+    content: replyContent
 });
         // ---- 8. 返回 OpenAI 格式 ----
         res.json({
-            choices: [{ message: { role: 'assistant', content: reply } }]
+            choices: [{ message: { role: 'assistant', content: replyContent } }]
         });
 
     } catch (e) {
