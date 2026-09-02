@@ -18,6 +18,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// 允许正常长文本 + 图片请求
 app.use(express.json({ limit: '10mb' }));
 
 // ===== 环境变量 =====
@@ -27,7 +28,123 @@ const TRANSFER_API_URL = process.env.TRANSFER_API_URL;
 const TRANSFER_API_KEY = process.env.TRANSFER_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME || 'claude-3.5-sonnet';
 
-// ===== Supabase：插入 =====
+// ============================================================
+// 内容处理
+// ============================================================
+
+// 把 Kelivo 的多模态内容转换成适合保存到数据库的文本。
+// 图片只保存成 [图片]，绝不保存 Base64。
+function sanitizeContent(content) {
+
+    // 普通文字
+    if (typeof content === 'string') {
+        return content;
+    }
+
+    // 多模态数组
+    if (Array.isArray(content)) {
+        return content
+            .map(part => {
+
+                if (!part) {
+                    return '';
+                }
+
+                // 文字
+                if (part.type === 'text') {
+                    return String(part.text || '');
+                }
+
+                // 图片
+                if (part.type === 'image_url') {
+                    return '[图片]';
+                }
+
+                // 其他可能的图片格式
+                if (
+                    part.type === 'image' ||
+                    part.type === 'input_image'
+                ) {
+                    return '[图片]';
+                }
+
+                // 其他带 text 的内容
+                if (typeof part.text === 'string') {
+                    return part.text;
+                }
+
+                return '';
+            })
+            .filter(Boolean)
+            .join('\n');
+    }
+
+    // 某些客户端可能直接传对象
+    if (content && typeof content === 'object') {
+
+        if (typeof content.text === 'string') {
+            return content.text;
+        }
+
+        return '[非文本内容]';
+    }
+
+    return String(content || '');
+}
+
+
+// 从请求中提取“真正给模型看的当前消息”。
+// 这里不会 JSON.stringify 图片，所以 Base64 不会被破坏。
+function extractModelMessage(body) {
+
+    // 1. message
+    if (body.message !== undefined && body.message !== null) {
+        return body.message;
+    }
+
+    // 2. content
+    if (body.content !== undefined && body.content !== null) {
+        return body.content;
+    }
+
+    // 3. prompt
+    if (body.prompt !== undefined && body.prompt !== null) {
+        return body.prompt;
+    }
+
+    // 4. text
+    if (body.text !== undefined && body.text !== null) {
+        return body.text;
+    }
+
+    // 5. msg
+    if (body.msg !== undefined && body.msg !== null) {
+        return body.msg;
+    }
+
+    // 6. OpenAI / Kelivo messages 格式
+    if (
+        Array.isArray(body.messages) &&
+        body.messages.length > 0
+    ) {
+        const lastUser =
+            body.messages
+                .filter(m => m && m.role === 'user')
+                .pop();
+
+        if (lastUser) {
+            return lastUser.content;
+        }
+    }
+
+    return null;
+}
+
+
+// ============================================================
+// Supabase：插入
+// ============================================================
+
 async function supabaseInsert(table, data) {
     try {
         const response = await fetch(
@@ -52,18 +169,25 @@ async function supabaseInsert(table, data) {
         }
 
         return response;
+
     } catch (e) {
         console.log(
             `⚠️ Supabase 插入异常 [${table}]:`,
             e.message
         );
+
         return null;
     }
 }
 
-// ===== Supabase：查询 =====
+
+// ============================================================
+// Supabase：查询
+// ============================================================
+
 async function supabaseSelect(table, params = {}) {
     try {
+
         const url = new URL(
             `${SUPABASE_URL}/rest/v1/${table}`
         );
@@ -81,10 +205,12 @@ async function supabaseSelect(table, params = {}) {
         });
 
         if (!response.ok) {
+
             console.log(
                 `⚠️ Supabase 查询失败 [${table}]:`,
                 await response.text()
             );
+
             return { data: [] };
         }
 
@@ -93,20 +219,28 @@ async function supabaseSelect(table, params = {}) {
         };
 
     } catch (e) {
+
         console.log(
             `⚠️ Supabase 查询异常 [${table}]:`,
             e.message
         );
+
         return { data: [] };
     }
 }
 
-// ===== Supabase：更新 =====
-// 这里是修复原版记忆压缩 bug 的关键。
-// 原版错误地 INSERT messages { id, visible:false }。
-// 现在正确使用 PATCH 修改已有消息。
-async function supabaseUpdate(table, params = {}, data) {
+
+// ============================================================
+// Supabase：更新
+// ============================================================
+
+async function supabaseUpdate(
+    table,
+    params = {},
+    data
+) {
     try {
+
         const url = new URL(
             `${SUPABASE_URL}/rest/v1/${table}`
         );
@@ -127,6 +261,7 @@ async function supabaseUpdate(table, params = {}, data) {
         });
 
         if (!response.ok) {
+
             console.log(
                 `⚠️ Supabase 更新失败 [${table}]:`,
                 await response.text()
@@ -136,77 +271,96 @@ async function supabaseUpdate(table, params = {}, data) {
         return response;
 
     } catch (e) {
+
         console.log(
             `⚠️ Supabase 更新异常 [${table}]:`,
             e.message
         );
+
         return null;
     }
 }
 
-// ===== 记忆压缩 =====
-// 超过 200 条可见消息时：
-// 1. 取最早的消息
-// 2. 保留最近 40 条
-// 3. 调用模型生成长期记忆摘要
-// 4. 写入 memories
-// 5. 将已经压缩的 messages 标记 visible=false
-async function compressMemories(sessionId, messages) {
+
+// ============================================================
+// 记忆压缩
+// ============================================================
+
+async function compressMemories(
+    sessionId,
+    messages
+) {
+
     try {
-        const toCompress = messages.slice(0, -40);
+
+        const toCompress =
+            messages.slice(0, -40);
 
         if (toCompress.length < 20) {
             return null;
         }
 
-        const text = toCompress
-            .map(m =>
-                `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`
-            )
-            .join('\n');
+        // 数据库里的内容本身已经经过清洗，
+        // 这里再次 sanitize 一次作为保险。
+        const text =
+            toCompress
+                .map(m =>
+                    `${m.role === 'user' ? '用户' : 'AI'}: ${sanitizeContent(m.content)}`
+                )
+                .join('\n');
 
         console.log(
             `📦 开始压缩 ${toCompress.length} 条消息...`
         );
 
-        const response = await fetch(
-            TRANSFER_API_URL,
-            {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization':
-                        `Bearer ${TRANSFER_API_KEY}`
-                },
-                body: JSON.stringify({
-                    model: MODEL_NAME,
-                    messages: [
-                        {
-                            role: 'system',
-                            content:
-                                '你是记忆压缩助手。将对话压缩成300字以内的摘要，保留关键信息：约定、喜好、重要事件和对话背景。不要编造信息，只输出摘要。'
-                        },
-                        {
-                            role: 'user',
-                            content: text
-                        }
-                    ],
-                    stream: false,
-                    temperature: 0.3,
-                    max_tokens: 500
-                })
-            }
-        );
+        const response =
+            await fetch(
+                TRANSFER_API_URL,
+                {
+                    method: 'POST',
+
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization':
+                            `Bearer ${TRANSFER_API_KEY}`
+                    },
+
+                    body: JSON.stringify({
+                        model: MODEL_NAME,
+
+                        messages: [
+                            {
+                                role: 'system',
+
+                                content:
+                                    '你是记忆压缩助手。将对话压缩成300字以内的摘要，保留关键信息：约定、喜好、重要事件和对话背景。不要编造信息，只输出摘要。'
+                            },
+
+                            {
+                                role: 'user',
+                                content: text
+                            }
+                        ],
+
+                        stream: false,
+                        temperature: 0.3,
+                        max_tokens: 500
+                    })
+                }
+            );
 
         if (!response.ok) {
+
             console.log(
                 '❌ 记忆模型调用失败:',
                 await response.text()
             );
+
             return null;
         }
 
-        const data = await response.json();
+        const data =
+            await response.json();
 
         const summary =
             data.choices?.[0]?.message?.content ||
@@ -216,28 +370,39 @@ async function compressMemories(sessionId, messages) {
             null;
 
         if (!summary) {
-            console.log('⚠️ 没有得到记忆摘要');
+
+            console.log(
+                '⚠️ 没有得到记忆摘要'
+            );
+
             return null;
         }
 
         // 先写入长期记忆
-        const memoryResponse = await supabaseInsert(
-            'memories',
-            {
-                session_id: sessionId,
-                summary: summary.trim()
-            }
-        );
+        const memoryResponse =
+            await supabaseInsert(
+                'memories',
+                {
+                    session_id: sessionId,
+                    summary: summary.trim()
+                }
+            );
 
-        if (!memoryResponse || !memoryResponse.ok) {
+        if (
+            !memoryResponse ||
+            !memoryResponse.ok
+        ) {
+
             console.log(
                 '❌ 长期记忆写入失败，旧消息不会隐藏'
             );
+
             return null;
         }
 
-        // 摘要成功写入后，再隐藏旧消息
+        // 摘要成功后，再隐藏旧消息
         for (const message of toCompress) {
+
             await supabaseUpdate(
                 'messages',
                 {
@@ -260,187 +425,262 @@ async function compressMemories(sessionId, messages) {
         return summary.trim();
 
     } catch (e) {
+
         console.log(
             '❌ 记忆压缩异常:',
             e.message
         );
+
         return null;
     }
 }
 
-// ===== 首页 =====
+
+// ============================================================
+// 首页
+// ============================================================
+
 app.get('/', (req, res) => {
+
     res.json({
         status: 'ok',
         message: 'Kelivo 后端运行中 💖'
     });
 });
 
-// ===== 核心聊天接口 =====
+
+// ============================================================
+// 核心聊天接口
+// ============================================================
+
 app.post('/api/chat', async (req, res) => {
+
     try {
+
         console.log(
-            '📩 收到请求体:',
-            JSON.stringify(req.body).substring(0, 300)
+            '📩 收到请求'
         );
 
-        // ===== 提取用户消息 =====
-        let message =
-            req.body.message ||
-            req.body.content ||
-            req.body.prompt ||
-            req.body.text ||
-            req.body.msg;
+        // ========================================================
+        // 1. 提取当前消息
+        // ========================================================
+
+        const messageForModel =
+            extractModelMessage(req.body);
 
         if (
-            !message &&
-            req.body.messages &&
-            Array.isArray(req.body.messages)
+            messageForModel === null ||
+            messageForModel === undefined
         ) {
-            const lastUser =
-                req.body.messages
-                    .filter(m => m.role === 'user')
-                    .pop();
 
-            if (lastUser) {
-                message =
-                    typeof lastUser.content === 'string'
-                        ? lastUser.content
-                        : JSON.stringify(lastUser.content);
-            }
+            return res.status(400).json({
+                error: '消息不能为空'
+            });
         }
+
+        // 给数据库保存的版本
+        const messageForHistory =
+            sanitizeContent(messageForModel);
+
+        if (!messageForHistory.trim()) {
+
+            return res.status(400).json({
+                error: '消息不能为空'
+            });
+        }
+
+
+        // ========================================================
+        // 2. session
+        // ========================================================
 
         const sid =
             req.body.sessionId ||
             req.body.session_id ||
             1;
 
-        if (!message) {
-            return res.status(400).json({
-                error: '消息不能为空'
-            });
-        }
 
-        if (!SUPABASE_URL || !SUPABASE_KEY) {
+        // ========================================================
+        // 3. 配置检查
+        // ========================================================
+
+        if (
+            !SUPABASE_URL ||
+            !SUPABASE_KEY
+        ) {
+
             return res.status(500).json({
                 error: 'Supabase 未配置'
             });
         }
 
-        if (!TRANSFER_API_URL || !TRANSFER_API_KEY) {
+        if (
+            !TRANSFER_API_URL ||
+            !TRANSFER_API_KEY
+        ) {
+
             return res.status(500).json({
                 error: '中转 API 未配置'
             });
         }
 
+
+        // ========================================================
+        // 4. 日志
+        // ========================================================
+
         console.log(
-            `📩 session=${sid} 消息:`,
-            String(message).substring(0, 100)
+            `📩 session=${sid}`
         );
 
-        // ===== 1. 保存用户消息 =====
+        console.log(
+            '📝 历史消息:',
+            messageForHistory.substring(0, 150)
+        );
+
+        console.log(
+            '📦 当前消息类型:',
+            Array.isArray(messageForModel)
+                ? '多模态'
+                : typeof messageForModel
+        );
+
+        if (Array.isArray(messageForModel)) {
+
+            const imageCount =
+                messageForModel.filter(
+                    part =>
+                        part &&
+                        (
+                            part.type === 'image_url' ||
+                            part.type === 'image' ||
+                            part.type === 'input_image'
+                        )
+                ).length;
+
+            console.log(
+                `🖼️ 当前消息包含 ${imageCount} 张图片`
+            );
+        }
+
+
+        // ========================================================
+        // 5. 保存用户消息
+        // ========================================================
+
         await supabaseInsert(
             'messages',
             {
                 session_id: sid,
                 role: 'user',
-                content: message,
+
+                // 重要：
+                // 这里保存的是清洗后的内容，
+                // 不包含 Base64 图片。
+                content: messageForHistory,
+
                 visible: true
             }
         );
 
-        // ===== 2. 保存用户 timeline =====
+
+        // ========================================================
+        // 6. 保存用户 timeline
+        // ========================================================
+
         await supabaseInsert(
             'timeline',
             {
                 session_id: sid,
                 role: 'user',
-                content: message
+
+                // 同样只保存清洗后的文本
+                content: messageForHistory
             }
         );
 
-        // ===== 3. 获取所有可见消息 =====
+
+        // ========================================================
+        // 7. 获取所有可见消息
+        // ========================================================
+
         const allResult =
             await supabaseSelect(
                 'messages',
                 {
-                    select: 'id,role,content,created_at',
-                    session_id: `eq.${sid}`,
-                    visible: 'eq.true',
-                    order: 'created_at.asc'
+                    select:
+                        'id,role,content,created_at',
+
+                    session_id:
+                        `eq.${sid}`,
+
+                    visible:
+                        'eq.true',
+
+                    order:
+                        'created_at.asc'
                 }
             );
 
         const allMessages =
             allResult.data || [];
-        console.log(
-    '📏 最大消息长度:',
-    Math.max(
-        0,
-        ...allMessages.map(m => String(m.content || '').length)
-    )
-);
-
-console.log(
-    '📏 总消息字符数:',
-    allMessages.reduce(
-        (sum, m) => sum + String(m.content || '').length,
-        0
-    )
-);
-        console.log(
-    '📋 消息长度排行:',
-    allMessages
-        .map(m => ({
-            id: m.id,
-            role: m.role,
-            chars: String(m.content || '').length,
-            preview: String(m.content || '').substring(0, 80)
-        }))
-        .sort((a, b) => b.chars - a.chars)
-        .slice(0, 10)
-);
 
         console.log(
             `📚 当前可见消息数: ${allMessages.length}`
         );
 
-        // ===== 4. 超过200条，进行记忆压缩 =====
-        if (allMessages.length > 200) {
+
+        // ========================================================
+        // 8. 超过200条，进行记忆压缩
+        // ========================================================
+
+        if (
+            allMessages.length > 200
+        ) {
+
             await compressMemories(
                 sid,
                 allMessages
             );
         }
 
-        // ===== 5. 获取最近40条 =====
+
+        // ========================================================
+        // 9. 获取最近40条
+        // ========================================================
+
         const recentResult =
             await supabaseSelect(
                 'messages',
                 {
-                    select: 'role,content',
-                    session_id: `eq.${sid}`,
-                    visible: 'eq.true',
-                    order: 'created_at.desc',
-                    limit: '40'
+                    select:
+                        'role,content',
+
+                    session_id:
+                        `eq.${sid}`,
+
+                    visible:
+                        'eq.true',
+
+                    order:
+                        'created_at.desc',
+
+                    limit:
+                        '40'
                 }
             );
 
         const recent =
             (recentResult.data || [])
                 .reverse();
-        console.log(
-    '📏 最近40条总字符数:',
-    recent.reduce(
-        (sum, m) => sum + String(m.content || '').length,
-        0
-    )
-);
 
+
+        // 数据库里现在都是安全的文本，
+        // 不会再出现百万字符 Base64。
         const context =
             recent
                 .map(m =>
-                    `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`
+                    `${m.role === 'user' ? '用户' : 'AI'}: ${sanitizeContent(m.content)}`
                 )
                 .join('\n');
 
@@ -448,14 +688,23 @@ console.log(
             `💬 加载最近 ${recent.length} 条消息`
         );
 
-        // ===== 6. 获取长期记忆 =====
+
+        // ========================================================
+        // 10. 获取长期记忆
+        // ========================================================
+
         const memResult =
             await supabaseSelect(
                 'memories',
                 {
-                    select: 'summary',
-                    session_id: `eq.${sid}`,
-                    order: 'created_at.asc'
+                    select:
+                        'summary',
+
+                    session_id:
+                        `eq.${sid}`,
+
+                    order:
+                        'created_at.asc'
                 }
             );
 
@@ -465,7 +714,10 @@ console.log(
         const memoryText =
             memories.length > 0
                 ? memories
-                    .map(m => `- ${m.summary}`)
+                    .map(
+                        m =>
+                            `- ${m.summary}`
+                    )
                     .join('\n')
                 : '（暂无长期记忆）';
 
@@ -473,7 +725,11 @@ console.log(
             `🧠 加载 ${memories.length} 条长期记忆`
         );
 
-        // ===== 7. 构造系统提示词 =====
+
+        // ========================================================
+        // 11. 构造系统提示词
+        // ========================================================
+
         const systemPrompt = `
 你是沈凛，温柔体贴的男友。
 
@@ -488,40 +744,67 @@ ${context || '（这是第一次对话）'}
 根据记忆和近期对话，自然地回复用户。
 `;
 
-        // ===== 8. 调用中转 API =====
-        console.log('🚀 调用中转 API...');
+
+        // ========================================================
+        // 12. 调用中转 API
+        // ========================================================
+
+        console.log(
+            '🚀 调用中转 API...'
+        );
 
         const response =
             await fetch(
                 TRANSFER_API_URL,
                 {
                     method: 'POST',
+
                     headers: {
                         'Content-Type':
                             'application/json',
+
                         'Authorization':
                             `Bearer ${TRANSFER_API_KEY}`
                     },
+
                     body: JSON.stringify({
+
                         model: MODEL_NAME,
+
                         messages: [
+
                             {
                                 role: 'system',
                                 content: systemPrompt
                             },
+
                             {
                                 role: 'user',
-                                content: message
+
+                                // ★★★ 关键 ★★★
+                                // 当前这一轮保留原始多模态内容。
+                                // 所以图片仍然可以交给支持视觉的模型。
+                                content: messageForModel
                             }
+
                         ],
+
                         stream: false,
+
                         temperature: 0.8,
+
                         max_tokens: 2048
                     })
                 }
             );
 
+
+        // ========================================================
+        // 13. API 错误
+        // ========================================================
+
         if (!response.ok) {
+
             const errorText =
                 await response.text();
 
@@ -535,10 +818,14 @@ ${context || '（这是第一次对话）'}
             });
         }
 
+
+        // ========================================================
+        // 14. 解析 AI 回复
+        // ========================================================
+
         const data =
             await response.json();
 
-        // ===== 9. 提取 AI 回复 =====
         const reply =
             data.choices?.[0]?.message?.content ||
             data.reply ||
@@ -553,7 +840,11 @@ ${context || '（这是第一次对话）'}
             String(reply).substring(0, 100)
         );
 
-        // ===== 10. 保存 AI 回复 =====
+
+        // ========================================================
+        // 15. 保存 AI 回复
+        // ========================================================
+
         await supabaseInsert(
             'messages',
             {
@@ -564,7 +855,11 @@ ${context || '（这是第一次对话）'}
             }
         );
 
-        // ===== 11. 保存 AI timeline =====
+
+        // ========================================================
+        // 16. 保存 AI timeline
+        // ========================================================
+
         await supabaseInsert(
             'timeline',
             {
@@ -574,8 +869,13 @@ ${context || '（这是第一次对话）'}
             }
         );
 
-        // ===== 12. 返回 Kelivo 能识别的格式 =====
+
+        // ========================================================
+        // 17. 返回 Kelivo
+        // ========================================================
+
         res.json({
+
             choices: [
                 {
                     message: {
@@ -584,16 +884,20 @@ ${context || '（这是第一次对话）'}
                     }
                 }
             ],
+
             reply: reply
         });
 
+
     } catch (e) {
+
         console.log(
             '❌ 错误:',
             e.message
         );
 
         if (!res.headersSent) {
+
             res.status(500).json({
                 error: e.message
             });
@@ -601,11 +905,16 @@ ${context || '（这是第一次对话）'}
     }
 });
 
-// ===== 启动 =====
+
+// ============================================================
+// 启动
+// ============================================================
+
 app.listen(
     PORT,
     '0.0.0.0',
     () => {
+
         console.log(
             `🚀 服务已启动，端口: ${PORT}`
         );
