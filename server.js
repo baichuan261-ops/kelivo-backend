@@ -458,7 +458,28 @@ app.get('/', (req, res) => {
 // ============================================================
 
 app.post('/api/chat', async (req, res) => {
+console.log(
+    '🛠️ 请求字段:',
+    Object.keys(req.body || {})
+);
 
+console.log(
+    '🛠️ 工具相关字段:',
+    JSON.stringify(
+        {
+            tools: req.body?.tools,
+            tool_choice: req.body?.tool_choice,
+            tool_calls: req.body?.tool_calls,
+            messages: req.body?.messages?.slice?.(-5)
+        },
+        (key, value) => {
+            if (typeof value === 'string' && value.length > 500) {
+                return `[字符串 ${value.length} 字符]`;
+            }
+            return value;
+        }
+    ).substring(0, 10000)
+);
     try {
 
         console.log(
