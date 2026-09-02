@@ -18,7 +18,7 @@ app.use((req, res, next) => {
     next();
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // ===== 环境变量 =====
 const SUPABASE_URL = process.env.SUPABASE_URL;
