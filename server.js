@@ -373,6 +373,21 @@ app.post('/api/chat', async (req, res) => {
 
         const allMessages =
             allResult.data || [];
+        console.log(
+    '📏 最大消息长度:',
+    Math.max(
+        0,
+        ...allMessages.map(m => String(m.content || '').length)
+    )
+);
+
+console.log(
+    '📏 总消息字符数:',
+    allMessages.reduce(
+        (sum, m) => sum + String(m.content || '').length,
+        0
+    )
+);
 
         console.log(
             `📚 当前可见消息数: ${allMessages.length}`
@@ -402,6 +417,13 @@ app.post('/api/chat', async (req, res) => {
         const recent =
             (recentResult.data || [])
                 .reverse();
+        console.log(
+    '📏 最近40条总字符数:',
+    recent.reduce(
+        (sum, m) => sum + String(m.content || '').length,
+        0
+    )
+);
 
         const context =
             recent
