@@ -388,6 +388,18 @@ console.log(
         0
     )
 );
+        console.log(
+    '📋 消息长度排行:',
+    allMessages
+        .map(m => ({
+            id: m.id,
+            role: m.role,
+            chars: String(m.content || '').length,
+            preview: String(m.content || '').substring(0, 80)
+        }))
+        .sort((a, b) => b.chars - a.chars)
+        .slice(0, 10)
+);
 
         console.log(
             `📚 当前可见消息数: ${allMessages.length}`
