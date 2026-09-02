@@ -363,6 +363,11 @@ async function compressMemories(
         const data =
             await response.json();
         console.log(
+    '🤖 AI返回:',
+    JSON.stringify(data).substring(0, 10000)
+);
+        console.log(
+            
     `⏱️ 中转 API 总耗时: ${Date.now() - apiStartTime} ms`
 );
 
