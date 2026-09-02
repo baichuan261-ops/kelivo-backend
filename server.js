@@ -3,6 +3,7 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const apiStartTime = Date.now();
 console.log('🚀 服务启动中...');
 
 // ===== CORS =====
@@ -361,6 +362,9 @@ async function compressMemories(
 
         const data =
             await response.json();
+        console.log(
+    `⏱️ 中转 API 总耗时: ${Date.now() - apiStartTime} ms`
+);
 
         const summary =
             data.choices?.[0]?.message?.content ||
