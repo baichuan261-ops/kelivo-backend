@@ -738,31 +738,75 @@ app.post(
             // ③ 保存用户消息
             // ==================================================
 
-            await supabaseInsert(
-                'messages',
-                {
-                    session_id:
-                        sid,
-                    role:
-                        'user',
-                    content:
-                        messageForHistory,
-                    visible:
-                        true
-                }
-            );
+         // ==================================================
+// 保存用户消息
+// ==================================================
+//
+// 正常请求：
+//   最后一条是 user
+//   → 保存一次用户消息
+//
+// MCP 工具续接请求：
+//   最后一条是 tool
+//   → 这是 Kelivo 把工具结果送回来
+//   → 不再重复保存上一条 user 消息
+//
+// 否则每调用一次 MCP，Supabase 都会多出一条
+// 完全相同的用户消息。
+// ==================================================
 
-            await supabaseInsert(
-                'timeline',
-                {
-                    session_id:
-                        sid,
-                    role:
-                        'user',
-                    content:
-                        messageForHistory
-                }
-            );
+const clientMessages =
+    Array.isArray(req.body.messages)
+        ? req.body.messages
+        : [];
+
+const lastClientMessage =
+    clientMessages.length > 0
+        ? clientMessages[clientMessages.length - 1]
+        : null;
+
+const isToolContinuation =
+    lastClientMessage &&
+    lastClientMessage.role === 'tool';
+
+if (isToolContinuation) {
+
+    console.log(
+        '🛠️ 检测到 MCP 工具结果续接请求，不重复保存用户消息'
+    );
+
+} else {
+
+    console.log(
+        '💾 保存新的用户消息'
+    );
+
+    await supabaseInsert(
+        'messages',
+        {
+            session_id:
+                sid,
+            role:
+                'user',
+            content:
+                messageForHistory,
+            visible:
+                true
+        }
+    );
+
+    await supabaseInsert(
+        'timeline',
+        {
+            session_id:
+                sid,
+            role:
+                'user',
+            content:
+                messageForHistory
+        }
+    );
+}
 
             // ==================================================
             // ④ 记忆压缩
