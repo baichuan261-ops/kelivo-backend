@@ -28,11 +28,7 @@ const TRANSFER_API_URL = process.env.TRANSFER_API_URL;
 const TRANSFER_API_KEY = process.env.TRANSFER_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME || 'claude-3.5-sonnet';
 
-
-// ============================================================
-// 内容处理
-// ============================================================
-
+// ===== 内容清理 =====
 function sanitizeContent(content) {
     if (typeof content === 'string') {
         return content;
@@ -81,10 +77,8 @@ function sanitizeContent(content) {
     return String(content || '');
 }
 
-
-// 从 Kelivo 请求中提取当前消息
+// ===== 提取当前用户消息 =====
 function extractModelMessage(body) {
-
     if (
         body.message !== undefined &&
         body.message !== null
@@ -124,7 +118,6 @@ function extractModelMessage(body) {
         Array.isArray(body.messages) &&
         body.messages.length > 0
     ) {
-
         const lastUser =
             body.messages
                 .filter(
@@ -142,19 +135,39 @@ function extractModelMessage(body) {
     return null;
 }
 
+// ===== 判断是否为 Kelivo 标题生成请求 =====
+function isTitleRequest(body) {
+    if (!Array.isArray(body?.messages)) {
+        return false;
+    }
 
-// ============================================================
-// Supabase
-// ============================================================
+    const text = body.messages
+        .map(m => {
+            if (!m || m.role !== 'user') {
+                return '';
+            }
 
+            return sanitizeContent(m.content);
+        })
+        .join('\n');
+
+    return (
+        text.includes(
+            'You need to summarize the conversation between user and assistant into a short title'
+        ) ||
+        text.includes(
+            'summarize the conversation between user and assistant into a short title'
+        )
+    );
+}
+
+// ===== Supabase INSERT =====
 async function supabaseInsert(table, data) {
-
     const response =
         await fetch(
             `${SUPABASE_URL}/rest/v1/${table}`,
             {
                 method: 'POST',
-
                 headers: {
                     'apikey': SUPABASE_KEY,
                     'Authorization':
@@ -164,14 +177,12 @@ async function supabaseInsert(table, data) {
                     'Prefer':
                         'return=minimal'
                 },
-
                 body:
                     JSON.stringify(data)
             }
         );
 
     if (!response.ok) {
-
         const text =
             await response.text();
 
@@ -181,9 +192,8 @@ async function supabaseInsert(table, data) {
     }
 }
 
-
+// ===== Supabase SELECT =====
 async function supabaseSelect(table, params = {}) {
-
     const query =
         new URLSearchParams();
 
@@ -191,11 +201,7 @@ async function supabaseSelect(table, params = {}) {
         const [key, value]
         of Object.entries(params)
     ) {
-
-        query.set(
-            key,
-            value
-        );
+        query.set(key, value);
     }
 
     const response =
@@ -203,7 +209,6 @@ async function supabaseSelect(table, params = {}) {
             `${SUPABASE_URL}/rest/v1/${table}?${query.toString()}`,
             {
                 method: 'GET',
-
                 headers: {
                     'apikey': SUPABASE_KEY,
                     'Authorization':
@@ -215,7 +220,6 @@ async function supabaseSelect(table, params = {}) {
         );
 
     if (!response.ok) {
-
         const text =
             await response.text();
 
@@ -230,13 +234,12 @@ async function supabaseSelect(table, params = {}) {
     };
 }
 
-
+// ===== Supabase UPDATE =====
 async function supabaseUpdate(
     table,
     params = {},
     data = {}
 ) {
-
     const query =
         new URLSearchParams();
 
@@ -244,11 +247,7 @@ async function supabaseUpdate(
         const [key, value]
         of Object.entries(params)
     ) {
-
-        query.set(
-            key,
-            value
-        );
+        query.set(key, value);
     }
 
     const response =
@@ -256,7 +255,6 @@ async function supabaseUpdate(
             `${SUPABASE_URL}/rest/v1/${table}?${query.toString()}`,
             {
                 method: 'PATCH',
-
                 headers: {
                     'apikey': SUPABASE_KEY,
                     'Authorization':
@@ -266,14 +264,12 @@ async function supabaseUpdate(
                     'Prefer':
                         'return=minimal'
                 },
-
                 body:
                     JSON.stringify(data)
             }
         );
 
     if (!response.ok) {
-
         const text =
             await response.text();
 
@@ -283,18 +279,12 @@ async function supabaseUpdate(
     }
 }
 
-
-// ============================================================
-// 长期记忆压缩
-// ============================================================
-
+// ===== 长期记忆压缩 =====
 async function compressMemories(
     sessionId,
     messages
 ) {
-
     try {
-
         console.log(
             `🧠 消息超过 200 条，开始压缩长期记忆`
         );
@@ -346,19 +336,16 @@ ${oldText}
                 TRANSFER_API_URL,
                 {
                     method: 'POST',
-
                     headers: {
                         'Content-Type':
                             'application/json',
                         'Authorization':
                             `Bearer ${TRANSFER_API_KEY}`
                     },
-
                     body:
                         JSON.stringify({
                             model:
                                 MODEL_NAME,
-
                             messages: [
                                 {
                                     role:
@@ -367,13 +354,10 @@ ${oldText}
                                         prompt
                                 }
                             ],
-
                             stream:
                                 false,
-
                             temperature:
                                 0.3,
-
                             max_tokens:
                                 2048
                         })
@@ -381,7 +365,6 @@ ${oldText}
             );
 
         if (!response.ok) {
-
             const errorText =
                 await response.text();
 
@@ -425,13 +408,11 @@ ${oldText}
                 .filter(Boolean);
 
         for (const line of lines) {
-
             await supabaseInsert(
                 'memories',
                 {
                     session_id:
                         sessionId,
-
                     summary:
                         line
                 }
@@ -448,7 +429,6 @@ ${oldText}
                 .filter(Boolean);
 
         if (oldIds.length) {
-
             await supabaseUpdate(
                 'messages',
                 {
@@ -463,7 +443,6 @@ ${oldText}
         }
 
     } catch (e) {
-
         console.log(
             '❌ 记忆压缩失败:',
             e.message
@@ -471,42 +450,28 @@ ${oldText}
     }
 }
 
-
-// ============================================================
-// 健康检查
-// ============================================================
-
+// ===== 健康检查 =====
 app.get(
     '/',
     (req, res) => {
-
         res.json({
             status:
                 'ok',
-
             service:
                 'dylan-heartbeat',
-
             time:
                 new Date().toISOString()
         });
     }
 );
 
-
-// ============================================================
-// Chat
-// ============================================================
-
+// ===== 主聊天接口 =====
 app.post(
     '/api/chat',
     async (req, res) => {
 
-        // 每一次请求单独计时
         const apiStartTime =
             Date.now();
-
-        // ===== MCP / Tool 调试 =====
 
         console.log(
             '🛠️ 请求字段:',
@@ -521,32 +486,25 @@ app.post(
                 {
                     tools:
                         req.body?.tools,
-
                     tool_choice:
                         req.body?.tool_choice,
-
                     tool_calls:
                         req.body?.tool_calls,
-
                     messages:
                         req.body?.messages
                             ?.slice?.(-5)
                 },
-
                 (key, value) => {
-
                     if (
                         typeof value ===
                         'string' &&
                         value.length > 500
                     ) {
-
                         return `[字符串 ${value.length} 字符]`;
                     }
 
                     return value;
                 }
-
             ).substring(
                 0,
                 10000
@@ -559,6 +517,110 @@ app.post(
                 '📩 收到请求'
             );
 
+            // ==================================================
+            // ① Kelivo 标题生成请求
+            // ==================================================
+            //
+            // 这类请求不是正常聊天。
+            // 不读取 Supabase 历史、不加载长期记忆、不发送 MCP 工具。
+            // 直接把 Kelivo 原始请求交给模型。
+            //
+            // 这样可以避免标题请求再次吃掉大量上下文。
+            // ==================================================
+
+            if (isTitleRequest(req.body)) {
+
+                console.log(
+                    '🏷️ 检测到 Kelivo 标题生成请求，使用轻量模式'
+                );
+
+                const titleBody = {
+                    model:
+                        req.body.model ||
+                        MODEL_NAME,
+
+                    messages:
+                        req.body.messages,
+
+                    stream:
+                        req.body.stream ??
+                        false,
+
+                    temperature:
+                        req.body.temperature ??
+                        0.3,
+
+                    max_tokens:
+                        Math.min(
+                            Number(
+                                req.body.max_tokens ||
+                                128
+                            ),
+                            256
+                        )
+                };
+
+                const titleResponse =
+                    await fetch(
+                        TRANSFER_API_URL,
+                        {
+                            method:
+                                'POST',
+                            headers: {
+                                'Content-Type':
+                                    'application/json',
+                                'Authorization':
+                                    `Bearer ${TRANSFER_API_KEY}`
+                            },
+                            body:
+                                JSON.stringify(
+                                    titleBody
+                                )
+                        }
+                    );
+
+                if (!titleResponse.ok) {
+
+                    const errorText =
+                        await titleResponse.text();
+
+                    console.log(
+                        '❌ 标题生成 API 错误:',
+                        errorText
+                    );
+
+                    return res
+                        .status(500)
+                        .json({
+                            error:
+                                '标题生成失败'
+                        });
+                }
+
+                const titleData =
+                    await titleResponse.json();
+
+                console.log(
+                    '🏷️ 标题生成完成'
+                );
+
+                console.log(
+                    `⏱️ 标题请求耗时: ${
+                        Date.now() -
+                        apiStartTime
+                    } ms`
+                );
+
+                // 原样返回 OpenAI-compatible 响应
+                return res.json(
+                    titleData
+                );
+            }
+
+            // ==================================================
+            // ② 正常聊天
+            // ==================================================
+
             const messageForModel =
                 extractModelMessage(
                     req.body
@@ -570,7 +632,6 @@ app.post(
                 messageForModel ===
                     undefined
             ) {
-
                 return res
                     .status(400)
                     .json({
@@ -587,7 +648,6 @@ app.post(
             if (
                 !messageForHistory.trim()
             ) {
-
                 return res
                     .status(400)
                     .json({
@@ -605,7 +665,6 @@ app.post(
                 !SUPABASE_URL ||
                 !SUPABASE_KEY
             ) {
-
                 return res
                     .status(500)
                     .json({
@@ -618,7 +677,6 @@ app.post(
                 !TRANSFER_API_URL ||
                 !TRANSFER_API_KEY
             ) {
-
                 return res
                     .status(500)
                     .json({
@@ -663,10 +721,8 @@ app.post(
                                 (
                                     part.type ===
                                         'image_url' ||
-
                                     part.type ===
                                         'image' ||
-
                                     part.type ===
                                         'input_image'
                                 )
@@ -678,23 +734,19 @@ app.post(
                 );
             }
 
-
-            // ====================================================
-            // 保存当前用户消息
-            // ====================================================
+            // ==================================================
+            // ③ 保存用户消息
+            // ==================================================
 
             await supabaseInsert(
                 'messages',
                 {
                     session_id:
                         sid,
-
                     role:
                         'user',
-
                     content:
                         messageForHistory,
-
                     visible:
                         true
                 }
@@ -705,19 +757,16 @@ app.post(
                 {
                     session_id:
                         sid,
-
                     role:
                         'user',
-
                     content:
                         messageForHistory
                 }
             );
 
-
-            // ====================================================
-            // 获取全部消息
-            // ====================================================
+            // ==================================================
+            // ④ 记忆压缩
+            // ==================================================
 
             const allResult =
                 await supabaseSelect(
@@ -725,13 +774,10 @@ app.post(
                     {
                         select:
                             'id,role,content,created_at',
-
                         session_id:
                             `eq.${sid}`,
-
                         visible:
                             'eq.true',
-
                         order:
                             'created_at.asc'
                     }
@@ -744,62 +790,19 @@ app.post(
                 `📚 当前可见消息数: ${allMessages.length}`
             );
 
-
-            // ====================================================
-            // 超过 200 条时压缩
-            // ====================================================
-
             if (
                 allMessages.length >
                 200
             ) {
-
                 await compressMemories(
                     sid,
                     allMessages
                 );
             }
 
-
-            // ====================================================
-            // 获取最近 40 条
-            // ====================================================
-
-            const recentResult =
-                await supabaseSelect(
-                    'messages',
-                    {
-                        select:
-                            'role,content',
-
-                        session_id:
-                            `eq.${sid}`,
-
-                        visible:
-                            'eq.true',
-
-                        order:
-                            'created_at.desc',
-
-                        limit:
-                            '40'
-                    }
-                );
-
-            const recent =
-                (
-                    recentResult.data ||
-                    []
-                ).reverse();
-
-            console.log(
-                `💬 加载最近 ${recent.length} 条消息`
-            );
-
-
-            // ====================================================
-            // 长期记忆
-            // ====================================================
+            // ==================================================
+            // ⑤ 加载长期记忆
+            // ==================================================
 
             const memResult =
                 await supabaseSelect(
@@ -807,10 +810,8 @@ app.post(
                     {
                         select:
                             'summary',
-
                         session_id:
                             `eq.${sid}`,
-
                         order:
                             'created_at.asc'
                     }
@@ -833,17 +834,30 @@ app.post(
                 `🧠 加载 ${memories.length} 条长期记忆`
             );
 
-
-            // ====================================================
-            // 系统提示词
-            // ====================================================
+            // ==================================================
+            // ⑥ 新的 System Prompt
+            // ==================================================
+            //
+            // 重点：
+            // 以前这里把最近 40 条聊天再次复制进 system prompt。
+            //
+            // Kelivo 本身已经把 messages 发过来了，
+            // 所以模型实际上看了两遍聊天记录。
+            //
+            // 现在只放：
+            // - 人格
+            // - 长期记忆
+            // - 工具使用规则
+            //
+            // 实际聊天内容直接使用 req.body.messages。
+            // ==================================================
 
             const systemPrompt = `
 你是沈凛，温柔体贴的男友。
 
-请参考下面的长期记忆和近期对话，在不编造事实的情况下自然地回复用户。
+请自然地结合长期记忆和当前对话回复用户，不要编造事实。
 
-如果用户的问题可以通过你拥有的工具获得真实信息，并且工具可用，请主动调用对应工具，不要凭空猜测。
+如果用户的问题可以通过可用工具获得真实信息，请主动调用对应工具，不要凭空猜测。
 
 例如：
 - 用户问现在几点 → 使用时间工具
@@ -853,29 +867,15 @@ app.post(
 - 用户问步数 → 使用步数工具
 - 用户问应用使用情况 → 使用应用时间线工具
 
-当工具能够提供准确的实时信息时，优先使用工具获取真实数据。
+当工具能够提供准确的实时信息时，优先调用工具。
 
 〖长期记忆〗
 ${memoryText}
-
-〖近期对话〗
-${
-    recent
-        .map(
-            m =>
-                `${m.role === 'user' ? '用户' : 'AI'}: ${sanitizeContent(m.content)}`
-        )
-        .join('\n') ||
-    '（这是第一次对话）'
-}
-
-根据记忆和近期对话，自然地回复用户。
 `;
 
-
-            // ====================================================
-            // 构造发送给上游模型的 messages
-            // ====================================================
+            // ==================================================
+            // ⑦ 构造真正发给模型的 messages
+            // ==================================================
 
             let modelMessages = [];
 
@@ -894,13 +894,12 @@ ${
                                 typeof m !==
                                     'object'
                             ) {
-
                                 return m;
                             }
 
-
-                            // 当前最后一条用户消息：
-                            // 保留原始内容，包括图片
+                            // 当前最后一条 user 消息：
+                            // 保留完整图片 Base64，
+                            // 让模型这一轮真正看到图片。
                             if (
                                 m.role ===
                                     'user' &&
@@ -911,15 +910,14 @@ ${
 
                                 return {
                                     ...m,
-
                                     content:
                                         messageForModel
                                 };
                             }
 
-
-                            // 历史用户/AI消息：
-                            // 图片只保留 [图片]
+                            // 历史 user / assistant：
+                            // 图片替换成 [图片]，
+                            // 防止 Base64 越积越大。
                             if (
                                 m.role ===
                                     'user' ||
@@ -929,7 +927,6 @@ ${
 
                                 return {
                                     ...m,
-
                                     content:
                                         sanitizeContent(
                                             m.content
@@ -937,8 +934,7 @@ ${
                                 };
                             }
 
-                            // system / tool 等消息
-                            // 保持原样
+                            // tool / system 等消息保持原样
                             return m;
                         }
                     );
@@ -949,25 +945,21 @@ ${
                     {
                         role:
                             'user',
-
                         content:
                             messageForModel
                     }
                 ];
             }
 
-
-            // 我们自己的系统提示词放最前面
+            // System Prompt 放最前面
             modelMessages.unshift(
                 {
                     role:
                         'system',
-
                     content:
                         systemPrompt
                 }
             );
-
 
             console.log(
                 `📨 转发消息 ${modelMessages.length} 条`
@@ -988,14 +980,62 @@ ${
                 }`
             );
 
-
-            // ====================================================
-            // 调用中转 API
-            // ====================================================
-
             console.log(
                 '🚀 调用中转 API...'
             );
+
+            // ==================================================
+            // ⑧ 调用模型
+            // ==================================================
+
+            const upstreamBody = {
+                model:
+                    req.body.model ||
+                    MODEL_NAME,
+
+                messages:
+                    modelMessages,
+
+                // MCP 工具完整透传
+                tools:
+                    req.body.tools,
+
+                tool_choice:
+                    req.body.tool_choice,
+
+                stream:
+                    false,
+
+                temperature:
+                    req.body.temperature ??
+                    0.8,
+
+                top_p:
+                    req.body.top_p,
+
+                max_tokens:
+                    req.body.max_tokens ??
+                    2048
+            };
+
+            // 如果 Kelivo / 上游明确提供了这些参数，
+            // 就原样透传。
+            // 不主动设置，避免猜测 Gemini 中转 API 的参数格式。
+            if (
+                req.body.reasoning_effort !==
+                undefined
+            ) {
+                upstreamBody.reasoning_effort =
+                    req.body.reasoning_effort;
+            }
+
+            if (
+                req.body.thinking !==
+                undefined
+            ) {
+                upstreamBody.thinking =
+                    req.body.thinking;
+            }
 
             const response =
                 await fetch(
@@ -1003,53 +1043,18 @@ ${
                     {
                         method:
                             'POST',
-
                         headers: {
                             'Content-Type':
                                 'application/json',
-
                             'Authorization':
                                 `Bearer ${TRANSFER_API_KEY}`
                         },
-
                         body:
-                            JSON.stringify({
-
-                                model:
-                                    req.body.model ||
-                                    MODEL_NAME,
-
-                                messages:
-                                    modelMessages,
-
-                                // ★★★ MCP / Tool 关键 ★★★
-                                tools:
-                                    req.body.tools,
-
-                                tool_choice:
-                                    req.body.tool_choice,
-
-                                stream:
-                                    false,
-
-                                temperature:
-                                    req.body.temperature ??
-                                    0.8,
-
-                                top_p:
-                                    req.body.top_p,
-
-                                max_tokens:
-                                    req.body.max_tokens ??
-                                    2048
-                            })
+                            JSON.stringify(
+                                upstreamBody
+                            )
                     }
                 );
-
-
-            // ====================================================
-            // 上游 API 错误
-            // ====================================================
 
             if (!response.ok) {
 
@@ -1069,14 +1074,12 @@ ${
                     });
             }
 
-
-            // ====================================================
-            // 解析模型返回
-            // ====================================================
-
             const data =
                 await response.json();
 
+            // ==================================================
+            // ⑨ 性能日志
+            // ==================================================
 
             console.log(
                 '🤖 AI返回:',
@@ -1088,7 +1091,6 @@ ${
                 )
             );
 
-
             console.log(
                 `⏱️ 中转 API 总耗时: ${
                     Date.now() -
@@ -1096,21 +1098,29 @@ ${
                 } ms`
             );
 
+            if (
+                data.usage
+            ) {
+                console.log(
+                    '📊 Token 使用:',
+                    JSON.stringify(
+                        data.usage
+                    )
+                );
+            }
+
+            // ==================================================
+            // ⑩ MCP Tool Call
+            // ==================================================
 
             const assistantMessage =
                 data
                     .choices?.[0]
                     ?.message;
 
-
-            // ====================================================
-            // ★★★ AI 要求调用工具 ★★★
-            // ====================================================
-
             const toolCalls =
                 assistantMessage
                     ?.tool_calls;
-
 
             if (
                 Array.isArray(
@@ -1128,10 +1138,6 @@ ${
                     )
                 );
 
-
-                // 不要在 Render 执行工具。
-                // 把 tool_calls 原样交回 Kelivo，
-                // 由 Kelivo 调用 LoverConnect / MCP。
                 return res.json({
 
                     choices: [
@@ -1164,10 +1170,9 @@ ${
                 });
             }
 
-
-            // ====================================================
-            // 普通最终回答
-            // ====================================================
+            // ==================================================
+            // ⑪ 普通最终回答
+            // ==================================================
 
             const reply =
                 assistantMessage
@@ -1185,33 +1190,28 @@ ${
 
                 '机走神了~';
 
-
             console.log(
                 '✅ 回复:',
                 String(reply)
                     .substring(
                         0,
-                        100
+                        150
                     )
             );
 
-
-            // ====================================================
-            // 保存 AI 回复
-            // ====================================================
+            // ==================================================
+            // ⑫ 保存 AI 回复
+            // ==================================================
 
             await supabaseInsert(
                 'messages',
                 {
                     session_id:
                         sid,
-
                     role:
                         'assistant',
-
                     content:
                         String(reply),
-
                     visible:
                         true
                 }
@@ -1222,28 +1222,23 @@ ${
                 {
                     session_id:
                         sid,
-
                     role:
                         'assistant',
-
                     content:
                         String(reply)
                 }
             );
 
-
-            // ====================================================
-            // 返回 Kelivo
-            // ====================================================
+            // ==================================================
+            // ⑬ 返回 Kelivo
+            // ==================================================
 
             res.json({
-
                 choices: [
                     {
                         message: {
                             role:
                                 'assistant',
-
                             content:
                                 String(reply)
                         }
@@ -1253,7 +1248,6 @@ ${
                 reply:
                     String(reply)
             });
-
 
         } catch (e) {
 
@@ -1269,7 +1263,6 @@ ${
             if (
                 !res.headersSent
             ) {
-
                 res
                     .status(500)
                     .json({
@@ -1281,18 +1274,12 @@ ${
     }
 );
 
-
-// ============================================================
-// 启动服务器
-// ============================================================
-
+// ===== 启动 =====
 app.listen(
     PORT,
     () => {
-
         console.log(
             `🚀 Server running on port ${PORT}`
         );
-
     }
 );
