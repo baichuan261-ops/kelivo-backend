@@ -9,7 +9,7 @@ console.log('🚀 服务启动中...');
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key');
 
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
@@ -26,6 +26,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const TRANSFER_API_URL = process.env.TRANSFER_API_URL;
 const TRANSFER_API_KEY = process.env.TRANSFER_API_KEY;
+const CLIENT_API_KEY = process.env.CLIENT_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME || 'claude-3.5-sonnet';
 
 // ===== 内容清理 =====
@@ -464,6 +465,63 @@ app.post(
     '/api/chat',
     async (req, res) => {
 
+        // ==================================================
+        // 客户端身份验证
+        // ==================================================
+
+        if (!CLIENT_API_KEY) {
+            console.log(
+                '❌ CLIENT_API_KEY 未配置'
+            );
+
+            return res
+                .status(500)
+                .json({
+                    error:
+                        '服务器认证未配置'
+                });
+        }
+
+        const authHeader =
+            req.headers.authorization || '';
+
+        let clientKey = '';
+
+        // 兼容 Authorization: Bearer CLIENT_API_KEY
+        if (
+            authHeader.startsWith('Bearer ')
+        ) {
+            clientKey =
+                authHeader
+                    .substring(7)
+                    .trim();
+        }
+
+        // 同时兼容 x-api-key
+        if (!clientKey) {
+            clientKey =
+                req.headers['x-api-key'] || '';
+        }
+
+        if (
+            clientKey !== CLIENT_API_KEY
+        ) {
+            console.log(
+                '❌ 客户端认证失败'
+            );
+
+            return res
+                .status(401)
+                .json({
+                    error:
+                        'Unauthorized'
+                });
+        }
+
+        console.log(
+            '🔐 客户端认证通过'
+        );
+
         const apiStartTime =
             Date.now();
 
@@ -513,13 +571,6 @@ app.post(
 
             // ==================================================
             // ① Kelivo 标题生成请求
-            // ==================================================
-            //
-            // 这类请求不是正常聊天。
-            // 不读取 Supabase 历史、不加载长期记忆、不发送 MCP 工具。
-            // 直接把 Kelivo 原始请求交给模型。
-            //
-            // 这样可以避免标题请求再次吃掉大量上下文。
             // ==================================================
 
             if (isTitleRequest(req.body)) {
@@ -605,7 +656,6 @@ app.post(
                     } ms`
                 );
 
-                // 原样返回 OpenAI-compatible 响应
                 return res.json(
                     titleData
                 );
@@ -732,23 +782,6 @@ app.post(
             // ③ 保存用户消息
             // ==================================================
 
-            // ==================================================
-            // 保存用户消息
-            // ==================================================
-            //
-            // 正常请求：
-            //   最后一条是 user
-            //   → 保存一次用户消息
-            //
-            // MCP 工具续接请求：
-            //   最后一条是 tool
-            //   → 这是 Kelivo 把工具结果送回来
-            //   → 不再重复保存上一条 user 消息
-            //
-            // 否则每调用一次 MCP，Supabase 都会多出一条
-            // 完全相同的用户消息。
-            // ==================================================
-
             const clientMessages =
                 Array.isArray(req.body.messages)
                     ? req.body.messages
@@ -873,21 +906,7 @@ app.post(
             );
 
             // ==================================================
-            // ⑥ 新的 System Prompt
-            // ==================================================
-            //
-            // 重点：
-            // 以前这里把最近 40 条聊天再次复制进 system prompt。
-            //
-            // Kelivo 本身已经把 messages 发过来了，
-            // 所以模型实际上看了两遍聊天记录。
-            //
-            // 现在只放：
-            // - 人格
-            // - 长期记忆
-            // - 工具使用规则
-            //
-            // 实际聊天内容直接使用 req.body.messages。
+            // ⑥ System Prompt
             // ==================================================
 
             const systemPrompt = `
@@ -986,9 +1005,6 @@ ${memoryText}
                                 return m;
                             }
 
-                            // 当前最后一条 user 消息：
-                            // 保留完整图片 Base64，
-                            // 让模型这一轮真正看到图片。
                             if (
                                 m.role ===
                                     'user' &&
@@ -1004,9 +1020,6 @@ ${memoryText}
                                 };
                             }
 
-                            // 历史 user / assistant：
-                            // 图片替换成 [图片]，
-                            // 防止 Base64 越积越大。
                             if (
                                 m.role ===
                                     'user' ||
@@ -1023,7 +1036,6 @@ ${memoryText}
                                 };
                             }
 
-                            // tool / system 等消息保持原样
                             return m;
                         }
                     );
@@ -1040,7 +1052,6 @@ ${memoryText}
                 ];
             }
 
-            // System Prompt 放最前面
             modelMessages.unshift(
                 {
                     role:
@@ -1085,7 +1096,6 @@ ${memoryText}
                 messages:
                     modelMessages,
 
-                // MCP 工具完整透传
                 tools:
                     req.body.tools,
 
@@ -1107,9 +1117,6 @@ ${memoryText}
                     2048
             };
 
-            // 如果 Kelivo / 上游明确提供了这些参数，
-            // 就原样透传。
-            // 不主动设置，避免猜测 Gemini 中转 API 的参数格式。
             if (
                 req.body.reasoning_effort !==
                 undefined
