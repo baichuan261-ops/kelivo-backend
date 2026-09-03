@@ -532,35 +532,12 @@ app.post(
             )
         );
 
+        // 只记录工具数量，不记录工具定义和聊天内容
         console.log(
-            '🛠️ 工具相关字段:',
-            JSON.stringify(
-                {
-                    tools:
-                        req.body?.tools,
-                    tool_choice:
-                        req.body?.tool_choice,
-                    tool_calls:
-                        req.body?.tool_calls,
-                    messages:
-                        req.body?.messages
-                            ?.slice?.(-5)
-                },
-                (key, value) => {
-                    if (
-                        typeof value ===
-                        'string' &&
-                        value.length > 500
-                    ) {
-                        return `[字符串 ${value.length} 字符]`;
-                    }
-
-                    return value;
-                }
-            ).substring(
-                0,
-                10000
-            )
+            '🛠️ 工具请求:',
+            Array.isArray(req.body?.tools)
+                ? `${req.body.tools.length} 个`
+                : '0 个'
         );
 
         try {
@@ -733,15 +710,7 @@ app.post(
                 `📩 session=${sid}`
             );
 
-            console.log(
-                '📝 历史消息:',
-                messageForHistory
-                    .substring(
-                        0,
-                        150
-                    )
-            );
-
+            // 不再记录真实聊天内容
             console.log(
                 '📦 当前消息类型:',
                 Array.isArray(
@@ -1177,14 +1146,15 @@ ${memoryText}
             // ⑨ 性能日志
             // ==================================================
 
+            // 不再记录完整 AI 返回内容
+            const returnedMessage =
+                data?.choices?.[0]?.message;
+
             console.log(
                 '🤖 AI返回:',
-                JSON.stringify(
-                    data
-                ).substring(
-                    0,
-                    10000
-                )
+                returnedMessage?.tool_calls
+                    ? '包含工具调用'
+                    : '普通回复'
             );
 
             console.log(
@@ -1200,7 +1170,14 @@ ${memoryText}
                 console.log(
                     '📊 Token 使用:',
                     JSON.stringify(
-                        data.usage
+                        {
+                            prompt_tokens:
+                                data.usage.prompt_tokens,
+                            completion_tokens:
+                                data.usage.completion_tokens,
+                            total_tokens:
+                                data.usage.total_tokens
+                        }
                     )
                 );
             }
@@ -1286,13 +1263,9 @@ ${memoryText}
 
                 '机走神了~';
 
+            // 不再记录真实 AI 回复内容
             console.log(
-                '✅ 回复:',
-                String(reply)
-                    .substring(
-                        0,
-                        150
-                    )
+                '✅ 回复完成'
             );
 
             // ==================================================
