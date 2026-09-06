@@ -1008,7 +1008,6 @@ app.post(
                                 JSON.stringify(
                                     titleBody
                                 )
-                            }
                         }
                     );
 
@@ -1060,9 +1059,9 @@ app.post(
 
             if (
                 messageForModel ===
-                    null ||
+                null ||
                 messageForModel ===
-                    undefined
+                undefined
             ) {
                 return res
                     .status(400)
@@ -1415,7 +1414,7 @@ ${memoryText}
                                     'user' &&
                                 index ===
                                     req.body.messages.length -
-                                        1
+                                    1
                             ) {
 
                                 return {
