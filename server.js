@@ -29,6 +29,18 @@ const TRANSFER_API_KEY = process.env.TRANSFER_API_KEY;
 const CLIENT_API_KEY = process.env.CLIENT_API_KEY;
 const MODEL_NAME = process.env.MODEL_NAME || 'claude-3.5-sonnet';
 
+// ===== Render 日志配置 =====
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
+const RENDER_SERVICE_ID =
+    process.env.RENDER_SERVICE_ID ||
+    'srv-daamlb8n74is73bebocg';
+
+// Render ownerId 会自动从 Service 信息中获取
+let renderOwnerId = null;
+
+// 防止 AI 在一次请求里无限查询 Render
+const MAX_RENDER_TOOL_ROUNDS = 2;
+
 // ===== 内容清理 =====
 function sanitizeContent(content) {
     if (typeof content === 'string') {
@@ -161,6 +173,404 @@ function isTitleRequest(body) {
         )
     );
 }
+
+// ==================================================
+// Render API
+// ==================================================
+
+// ===== 获取 Render Service 信息 =====
+async function getRenderServiceInfo() {
+    if (!RENDER_API_KEY) {
+        throw new Error(
+            'RENDER_API_KEY 未配置'
+        );
+    }
+
+    if (!RENDER_SERVICE_ID) {
+        throw new Error(
+            'RENDER_SERVICE_ID 未配置'
+        );
+    }
+
+    const response =
+        await fetch(
+            `https://api.render.com/v1/services/${encodeURIComponent(RENDER_SERVICE_ID)}`,
+            {
+                method: 'GET',
+                headers: {
+                    'Accept':
+                        'application/json',
+                    'Authorization':
+                        `Bearer ${RENDER_API_KEY}`
+                }
+            }
+        );
+
+    if (!response.ok) {
+        const text =
+            await response.text();
+
+        throw new Error(
+            `Render Service 查询失败 (${response.status}): ${text}`
+        );
+    }
+
+    const data =
+        await response.json();
+
+    if (!data.ownerId) {
+        throw new Error(
+            'Render Service 信息中没有 ownerId'
+        );
+    }
+
+    renderOwnerId =
+        data.ownerId;
+
+    return data;
+}
+
+// ===== 清理 Render 日志 =====
+// 不把敏感认证信息交给模型
+function sanitizeRenderLogText(text) {
+    if (typeof text !== 'string') {
+        return '';
+    }
+
+    return text
+        .replace(
+            /Bearer\s+[A-Za-z0-9._~+/=-]+/gi,
+            'Bearer [已隐藏]'
+        )
+        .replace(
+            /(?:api[_-]?key|apikey|token|secret|password)\s*[:=]\s*[^\s,;]+/gi,
+            '$1=[已隐藏]'
+        )
+        .slice(0, 4000);
+}
+
+// ===== 读取 Render 日志 =====
+async function getRenderLogs(options = {}) {
+
+    if (!RENDER_API_KEY) {
+        return {
+            ok: false,
+            error:
+                'Render 日志功能未启用：RENDER_API_KEY 未配置。'
+        };
+    }
+
+    try {
+
+        if (!renderOwnerId) {
+            await getRenderServiceInfo();
+        }
+
+        const minutesRaw =
+            Number(
+                options.minutes ??
+                30
+            );
+
+        const minutes =
+            Math.min(
+                Math.max(
+                    Number.isFinite(minutesRaw)
+                        ? minutesRaw
+                        : 30,
+                    1
+                ),
+                120
+            );
+
+        const limitRaw =
+            Number(
+                options.limit ??
+                30
+            );
+
+        const limit =
+            Math.min(
+                Math.max(
+                    Number.isFinite(limitRaw)
+                        ? limitRaw
+                        : 30,
+                    1
+                ),
+                50
+            );
+
+        const allowedLevels = [
+            'debug',
+            'info',
+            'notice',
+            'warning',
+            'error',
+            'critical',
+            'alert',
+            'emergency'
+        ];
+
+        let level =
+            typeof options.level === 'string'
+                ? options.level.toLowerCase()
+                : 'error';
+
+        if (
+            !allowedLevels.includes(level)
+        ) {
+            level = 'error';
+        }
+
+        const endTime =
+            new Date();
+
+        const startTime =
+            new Date(
+                endTime.getTime() -
+                minutes * 60 * 1000
+            );
+
+        const params =
+            new URLSearchParams();
+
+        params.set(
+            'ownerId',
+            renderOwnerId
+        );
+
+        params.append(
+            'resource',
+            RENDER_SERVICE_ID
+        );
+
+        params.set(
+            'startTime',
+            startTime.toISOString()
+        );
+
+        params.set(
+            'endTime',
+            endTime.toISOString()
+        );
+
+        params.set(
+            'direction',
+            'backward'
+        );
+
+        params.append(
+            'level',
+            level
+        );
+
+        // 只读取应用运行日志
+        // 不读取 request logs，减少聊天/请求信息暴露
+        params.append(
+            'type',
+            'app'
+        );
+
+        params.set(
+            'limit',
+            String(limit)
+        );
+
+        const response =
+            await fetch(
+                `https://api.render.com/v1/logs?${params.toString()}`,
+                {
+                    method: 'GET',
+                    headers: {
+                        'Accept':
+                            'application/json',
+                        'Authorization':
+                            `Bearer ${RENDER_API_KEY}`
+                    }
+                }
+            );
+
+        if (!response.ok) {
+
+            const errorText =
+                await response.text();
+
+            console.log(
+                `❌ Render 日志 API 错误 (${response.status})`
+            );
+
+            if (
+                response.status === 401
+            ) {
+                return {
+                    ok: false,
+                    error:
+                        'Render API Key 无效或已失效。'
+                };
+            }
+
+            if (
+                response.status === 403
+            ) {
+                return {
+                    ok: false,
+                    error:
+                        'Render API Key 没有读取该服务日志的权限。'
+                };
+            }
+
+            if (
+                response.status === 429
+            ) {
+                return {
+                    ok: false,
+                    error:
+                        'Render 日志 API 暂时达到请求限制，请稍后再试。'
+                };
+            }
+
+            return {
+                ok: false,
+                error:
+                    `Render 日志读取失败 (${response.status})`
+            };
+        }
+
+        const data =
+            await response.json();
+
+        const rawLogs =
+            Array.isArray(data)
+                ? data
+                : (
+                    data.logs ||
+                    data.items ||
+                    data.data ||
+                    []
+                );
+
+        const logs =
+            rawLogs.map(log => {
+
+                const message =
+                    sanitizeRenderLogText(
+                        log.message ||
+                        log.text ||
+                        log.msg ||
+                        ''
+                    );
+
+                return {
+                    timestamp:
+                        log.timestamp ||
+                        log.time ||
+                        null,
+
+                    level:
+                        log.level ||
+                        level,
+
+                    type:
+                        log.type ||
+                        'app',
+
+                    message
+                };
+            })
+            .filter(
+                log =>
+                    log.message ||
+                    log.timestamp
+            );
+
+        console.log(
+            `🔎 AI读取 Render 日志: level=${level}, minutes=${minutes}, count=${logs.length}`
+        );
+
+        return {
+            ok: true,
+
+            service_id:
+                RENDER_SERVICE_ID,
+
+            time_range_minutes:
+                minutes,
+
+            level,
+
+            count:
+                logs.length,
+
+            logs
+        };
+
+    } catch (e) {
+
+        console.log(
+            '❌ Render 日志读取异常:',
+            e.message
+        );
+
+        return {
+            ok: false,
+            error:
+                e.message
+        };
+    }
+}
+
+// ===== Render 日志工具定义 =====
+const RENDER_LOG_TOOL = {
+    type: 'function',
+
+    function: {
+        name: 'render_logs',
+
+        description:
+            '读取当前 AI 后端对应的 Render 服务运行日志，仅用于排查后端报错、异常、服务故障和部署后问题。只读取 app 类型日志，不读取 HTTP request 日志。除非用户明确要求排查后端问题，否则不要调用。',
+
+        parameters: {
+            type: 'object',
+
+            properties: {
+
+                minutes: {
+                    type: 'integer',
+                    description:
+                        '查询最近多少分钟的日志，范围 1 到 120，默认 30。'
+                },
+
+                level: {
+                    type: 'string',
+
+                    enum: [
+                        'debug',
+                        'info',
+                        'notice',
+                        'warning',
+                        'error',
+                        'critical',
+                        'alert',
+                        'emergency'
+                    ],
+
+                    description:
+                        '日志严重程度。排查故障时通常使用 error；如果 error 没有结果，可以查询 warning。'
+                },
+
+                limit: {
+                    type: 'integer',
+
+                    description:
+                        '最多返回多少条日志，范围 1 到 50，默认 30。'
+                }
+            },
+
+            additionalProperties:
+                false
+        }
+    }
+};
 
 // ===== Supabase INSERT =====
 async function supabaseInsert(table, data) {
@@ -598,6 +1008,7 @@ app.post(
                                 JSON.stringify(
                                     titleBody
                                 )
+                            }
                         }
                     );
 
@@ -946,6 +1357,31 @@ app.post(
 用户明确询问屏幕使用时间时，使用屏幕使用时间工具。
 用户明确询问应用使用情况时，使用应用时间线工具。
 
+【Render 后端日志】
+
+render_logs 是专门用于排查这个 AI 后端本身的问题。
+
+只有在以下情况才使用：
+1. 用户明确让你检查后端、Render、日志或报错。
+2. 当前请求明显是在排查服务异常。
+3. 你已经发现请求可能因为后端故障而失败，需要进一步确认。
+
+不要在普通聊天中调用 render_logs。
+
+如果用户说“看看后端为什么报错”“检查一下 Render 日志”“看看刚才为什么失败”等，可以调用 render_logs。
+
+优先查询最近 30 分钟的 error 日志。
+
+如果没有 error，再考虑查询 warning。
+
+不要为了确认普通聊天状态而读取 Render 日志。
+
+Render 日志返回的是技术运行信息，不要把它当成用户聊天内容。
+
+不要根据日志猜测用户的私人信息。
+
+如果日志中出现疑似 token、API key、密码、Authorization 等敏感信息，不要在最终回答中复述。
+
 〖长期记忆〗
 ${memoryText}
 `;
@@ -1049,141 +1485,300 @@ ${memoryText}
                 }`
             );
 
+            // ==================================================
+            // ⑧ 构造工具列表
+            // ==================================================
+
+            let modelTools = [];
+
+            if (
+                Array.isArray(
+                    req.body.tools
+                )
+            ) {
+                modelTools =
+                    [...req.body.tools];
+            }
+
+            // 如果客户端没有明确禁止工具，则加入 Render 日志工具
+            if (
+                req.body.tool_choice !==
+                'none'
+            ) {
+                modelTools.push(
+                    RENDER_LOG_TOOL
+                );
+            }
+
+            // ==================================================
+            // ⑨ 调用模型
+            // ==================================================
+
+            async function callUpstream(
+                messages
+            ) {
+
+                const upstreamBody = {
+                    model:
+                        req.body.model ||
+                        MODEL_NAME,
+
+                    messages:
+                        messages,
+
+                    tools:
+                        modelTools.length > 0
+                            ? modelTools
+                            : undefined,
+
+                    tool_choice:
+                        req.body.tool_choice,
+
+                    stream:
+                        false,
+
+                    temperature:
+                        req.body.temperature ??
+                        0.8,
+
+                    top_p:
+                        req.body.top_p,
+
+                    max_tokens:
+                        req.body.max_tokens ??
+                        2048
+                };
+
+                if (
+                    req.body.reasoning_effort !==
+                    undefined
+                ) {
+                    upstreamBody.reasoning_effort =
+                        req.body.reasoning_effort;
+                }
+
+                if (
+                    req.body.thinking !==
+                    undefined
+                ) {
+                    upstreamBody.thinking =
+                        req.body.thinking;
+                }
+
+                const response =
+                    await fetch(
+                        TRANSFER_API_URL,
+                        {
+                            method:
+                                'POST',
+                            headers: {
+                                'Content-Type':
+                                    'application/json',
+                                'Authorization':
+                                    `Bearer ${TRANSFER_API_KEY}`
+                            },
+                            body:
+                                JSON.stringify(
+                                    upstreamBody
+                                )
+                        }
+                    );
+
+                if (!response.ok) {
+
+                    const errorText =
+                        await response.text();
+
+                    console.log(
+                        '❌ 中转 API 错误:',
+                        errorText
+                    );
+
+                    throw new Error(
+                        '调用模型失败'
+                    );
+                }
+
+                return await response.json();
+            }
+
             console.log(
                 '🚀 调用中转 API...'
             );
 
-            // ==================================================
-            // ⑧ 调用模型
-            // ==================================================
-
-            const upstreamBody = {
-                model:
-                    req.body.model ||
-                    MODEL_NAME,
-
-                messages:
-                    modelMessages,
-
-                tools:
-                    req.body.tools,
-
-                tool_choice:
-                    req.body.tool_choice,
-
-                stream:
-                    false,
-
-                temperature:
-                    req.body.temperature ??
-                    0.8,
-
-                top_p:
-                    req.body.top_p,
-
-                max_tokens:
-                    req.body.max_tokens ??
-                    2048
-            };
-
-            if (
-                req.body.reasoning_effort !==
-                undefined
-            ) {
-                upstreamBody.reasoning_effort =
-                    req.body.reasoning_effort;
-            }
-
-            if (
-                req.body.thinking !==
-                undefined
-            ) {
-                upstreamBody.thinking =
-                    req.body.thinking;
-            }
-
-            const response =
-                await fetch(
-                    TRANSFER_API_URL,
-                    {
-                        method:
-                            'POST',
-                        headers: {
-                            'Content-Type':
-                                'application/json',
-                            'Authorization':
-                                `Bearer ${TRANSFER_API_KEY}`
-                        },
-                        body:
-                            JSON.stringify(
-                                upstreamBody
-                            )
-                    }
+            let data =
+                await callUpstream(
+                    modelMessages
                 );
 
-            if (!response.ok) {
+            // ==================================================
+            // ⑩ Render Tool Call
+            // ==================================================
 
-                const errorText =
-                    await response.text();
+            let renderToolRound = 0;
 
-                console.log(
-                    '❌ 中转 API 错误:',
-                    errorText
-                );
+            while (
+                renderToolRound <
+                MAX_RENDER_TOOL_ROUNDS
+            ) {
 
-                return res
-                    .status(500)
-                    .json({
-                        error:
-                            '调用模型失败'
+                const currentMessage =
+                    data
+                        ?.choices?.[0]
+                        ?.message;
+
+                const currentToolCalls =
+                    currentMessage
+                        ?.tool_calls;
+
+                if (
+                    !Array.isArray(
+                        currentToolCalls
+                    ) ||
+                    currentToolCalls.length === 0
+                ) {
+                    break;
+                }
+
+                const renderCalls =
+                    currentToolCalls.filter(
+                        call =>
+                            call?.function
+                                ?.name ===
+                            'render_logs'
+                    );
+
+                const otherToolCalls =
+                    currentToolCalls.filter(
+                        call =>
+                            call?.function
+                                ?.name !==
+                            'render_logs'
+                    );
+
+                // 如果存在客户端自己的 MCP 工具，
+                // 保持原来的行为，把这些工具调用交给 Kelivo。
+                if (
+                    otherToolCalls.length > 0
+                ) {
+
+                    console.log(
+                        '🛠️ AI请求调用客户端工具:',
+                        otherToolCalls.map(
+                            call =>
+                                call.function
+                                    ?.name
+                        )
+                    );
+
+                    return res.json({
+
+                        choices: [
+                            {
+                                message: {
+                                    role:
+                                        'assistant',
+
+                                    content:
+                                        currentMessage
+                                            .content ??
+                                        null,
+
+                                    tool_calls:
+                                        currentToolCalls
+                                },
+
+                                finish_reason:
+                                    data
+                                        .choices?.[0]
+                                        ?.finish_reason ||
+                                    'tool_calls'
+                            }
+                        ],
+
+                        reply:
+                            currentMessage
+                                .content ??
+                            null
                     });
-            }
+                }
 
-            const data =
-                await response.json();
+                if (
+                    renderCalls.length === 0
+                ) {
+                    break;
+                }
 
-            // ==================================================
-            // ⑨ 性能日志
-            // ==================================================
-
-            // 不再记录完整 AI 返回内容
-            const returnedMessage =
-                data?.choices?.[0]?.message;
-
-            console.log(
-                '🤖 AI返回:',
-                returnedMessage?.tool_calls
-                    ? '包含工具调用'
-                    : '普通回复'
-            );
-
-            console.log(
-                `⏱️ 中转 API 总耗时: ${
-                    Date.now() -
-                    apiStartTime
-                } ms`
-            );
-
-            if (
-                data.usage
-            ) {
                 console.log(
-                    '📊 Token 使用:',
-                    JSON.stringify(
-                        {
-                            prompt_tokens:
-                                data.usage.prompt_tokens,
-                            completion_tokens:
-                                data.usage.completion_tokens,
-                            total_tokens:
-                                data.usage.total_tokens
-                        }
-                    )
+                    `🧰 AI请求读取 Render 日志，共 ${renderCalls.length} 个调用`
                 );
+
+                // 把 AI 的 tool call 先放回上下文
+                modelMessages.push(
+                    currentMessage
+                );
+
+                for (
+                    const call
+                    of renderCalls
+                ) {
+
+                    let args = {};
+
+                    try {
+                        args =
+                            JSON.parse(
+                                call
+                                    ?.function
+                                    ?.arguments ||
+                                '{}'
+                            );
+                    } catch (e) {
+
+                        args = {};
+
+                        console.log(
+                            '⚠️ Render tool 参数解析失败，使用默认参数'
+                        );
+                    }
+
+                    const result =
+                        await getRenderLogs(
+                            args
+                        );
+
+                    modelMessages.push({
+
+                        role:
+                            'tool',
+
+                        tool_call_id:
+                            call.id,
+
+                        name:
+                            'render_logs',
+
+                        content:
+                            JSON.stringify(
+                                result
+                            )
+                    });
+                }
+
+                renderToolRound++;
+
+                console.log(
+                    `🔄 Render 日志结果返回模型，第 ${renderToolRound} 轮`
+                );
+
+                data =
+                    await callUpstream(
+                        modelMessages
+                    );
             }
 
             // ==================================================
-            // ⑩ MCP Tool Call
+            // ⑪ 性能日志
             // ==================================================
 
             const assistantMessage =
@@ -1195,6 +1790,8 @@ ${memoryText}
                 assistantMessage
                     ?.tool_calls;
 
+            // 如果达到 Render tool 最大轮数仍然有工具调用，
+            // 为安全起见，不继续无限循环。
             if (
                 Array.isArray(
                     toolCalls
@@ -1243,8 +1840,37 @@ ${memoryText}
                 });
             }
 
+            console.log(
+                '🤖 AI返回普通回复'
+            );
+
+            console.log(
+                `⏱️ 中转 API 总耗时: ${
+                    Date.now() -
+                    apiStartTime
+                } ms`
+            );
+
+            if (
+                data.usage
+            ) {
+                console.log(
+                    '📊 Token 使用:',
+                    JSON.stringify(
+                        {
+                            prompt_tokens:
+                                data.usage.prompt_tokens,
+                            completion_tokens:
+                                data.usage.completion_tokens,
+                            total_tokens:
+                                data.usage.total_tokens
+                        }
+                    )
+                );
+            }
+
             // ==================================================
-            // ⑪ 普通最终回答
+            // ⑫ 普通最终回答
             // ==================================================
 
             const reply =
@@ -1263,13 +1889,12 @@ ${memoryText}
 
                 '机走神了~';
 
-            // 不再记录真实 AI 回复内容
             console.log(
                 '✅ 回复完成'
             );
 
             // ==================================================
-            // ⑫ 保存 AI 回复
+            // ⑬ 保存 AI 回复
             // ==================================================
 
             await supabaseInsert(
@@ -1299,7 +1924,7 @@ ${memoryText}
             );
 
             // ==================================================
-            // ⑬ 返回 Kelivo
+            // ⑭ 返回 Kelivo
             // ==================================================
 
             res.json({
