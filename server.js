@@ -1937,9 +1937,13 @@ app.post(
                         )
                 );
 
-            if (hasToolContext) {
+                   if (hasToolContext) {
+                // 只保留最后 20 条工具上下文，避免请求过大导致超时
+                const MAX_TOOL_CONTEXT = 20;
+                const recentClientMessages = clientMessages.slice(-MAX_TOOL_CONTEXT);
+                
                 modelMessages =
-                    clientMessages.map(
+                    recentClientMessages.map(
                         (m, index) => {
                             if (
                                 !m ||
@@ -1950,7 +1954,7 @@ app.post(
 
                             if (
                                 m.role === 'user' &&
-                                index === clientMessages.length - 1
+                                index === recentClientMessages.length - 1
                             ) {
                                 return {
                                     ...m,
@@ -1975,9 +1979,11 @@ app.post(
                     );
 
                 console.log(
-                    '🛠️ 检测到工具续接，保留客户端工具上下文: ' +
-                    modelMessages.length +
-                    ' 条'
+                    '🛠️ 检测到工具续接，保留最近 ' +
+                    MAX_TOOL_CONTEXT +
+                    ' 条工具上下文（原始 ' +
+                    clientMessages.length +
+                    ' 条）'
                 );
             } else {
                 modelMessages =
