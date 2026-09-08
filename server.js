@@ -895,6 +895,244 @@ async function supabaseUpdate(
 }
 
 // ==================================================
+// 上下文整理：近期对话 + 最近变化候选
+// ==================================================
+
+const RECENT_CONTEXT_MESSAGE_LIMIT = 36;
+const RECENT_CONTEXT_CHAR_LIMIT = 16000;
+const RECENT_CHANGE_SCAN_LIMIT = 80;
+const RECENT_CHANGE_MAX_ITEMS = 8;
+const RECENT_CHANGE_CHAR_LIMIT = 5000;
+const MEMORY_CONTEXT_MAX_ITEMS = 20;
+const MEMORY_CONTEXT_CHAR_LIMIT = 7000;
+
+const CHANGE_MARKERS = [
+    '现在', '以后', '之前', '刚刚', '最近', '今天', '昨天', '明天',
+    '已经', '决定', '打算', '计划', '改成', '换成', '取消', '恢复',
+    '新增', '删除', '更新', '解决', '发生', '开始', '结束', '不再',
+    '不要再', '以后不要', '以后要', '记住', '忘掉', '喜欢', '不喜欢',
+    '讨厌', '习惯', '关系', '闹矛盾', '吵架', '和好', '考试', '课程',
+    '学校', '工作', '项目', '部署', '修好了', '修复', '报错', '上线',
+    '搬', '买了', '卖了', '换了', '新增了', '删掉', '改了'
+];
+
+function normalizeHistoryMessage(message) {
+    if (!message || typeof message !== 'object') {
+        return null;
+    }
+
+    if (
+        message.role !== 'user' &&
+        message.role !== 'assistant'
+    ) {
+        return null;
+    }
+
+    const content = sanitizeContent(message.content);
+
+    if (!content.trim()) {
+        return null;
+    }
+
+    return {
+        role: message.role,
+        content
+    };
+}
+
+function trimMessagesByCharBudget(messages, maxChars) {
+    const result = [];
+    let totalChars = 0;
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const message = normalizeHistoryMessage(messages[i]);
+
+        if (!message) {
+            continue;
+        }
+
+        const extra = message.content.length + 20;
+
+        if (
+            result.length > 0 &&
+            totalChars + extra > maxChars
+        ) {
+            break;
+        }
+
+        result.unshift(message);
+        totalChars += extra;
+    }
+
+    return result;
+}
+
+function isLikelyChangeMessage(message) {
+    if (!message || message.role !== 'user') {
+        return false;
+    }
+
+    const text = sanitizeContent(message.content).trim();
+
+    if (!text) {
+        return false;
+    }
+
+    if (text.length < 8) {
+        return false;
+    }
+
+    return CHANGE_MARKERS.some(marker => text.includes(marker));
+}
+
+function buildRecentChangeContext(messages) {
+    const sourceMessages = Array.isArray(messages)
+        ? messages.slice(0, -1)
+        : [];
+
+    // 近期对话已经会直接送给模型，因此变化补充只扫描
+    // “近期对话窗口”之外的较新历史，避免同一内容重复占用上下文。
+    const recentBoundary = Math.max(
+        0,
+        sourceMessages.length - RECENT_CONTEXT_MESSAGE_LIMIT
+    );
+
+    const source = sourceMessages
+        .slice(
+            Math.max(
+                0,
+                sourceMessages.length - RECENT_CHANGE_SCAN_LIMIT
+            ),
+            recentBoundary
+        );
+
+    const candidates = [];
+
+    for (let i = source.length - 1; i >= 0; i--) {
+        const message = source[i];
+
+        if (!isLikelyChangeMessage(message)) {
+            continue;
+        }
+
+        const current = normalizeHistoryMessage(message);
+
+        if (!current) {
+            continue;
+        }
+
+        // 尽量把该条用户消息前后的 AI 回复一起带上，避免模型只看到
+        // “发生了什么”，却不知道最后得出了什么结论。
+        const nearby = [];
+        const sourceIndex = source.indexOf(message);
+
+        if (sourceIndex > 0) {
+            const previous = normalizeHistoryMessage(source[sourceIndex - 1]);
+            if (previous && previous.role === 'assistant') {
+                nearby.push(previous);
+            }
+        }
+
+        nearby.push(current);
+
+        if (sourceIndex + 1 < source.length) {
+            const next = normalizeHistoryMessage(source[sourceIndex + 1]);
+            if (next && next.role === 'assistant') {
+                nearby.push(next);
+            }
+        }
+
+        candidates.push(...nearby);
+
+        if (candidates.length >= RECENT_CHANGE_MAX_ITEMS * 3) {
+            break;
+        }
+    }
+
+    if (!candidates.length) {
+        return '（近期没有检测到明确的变化信息）';
+    }
+
+    const deduped = [];
+    const seen = new Set();
+
+    for (const message of candidates) {
+        const key = message.role + '|' + message.content;
+
+        if (seen.has(key)) {
+            continue;
+        }
+
+        seen.add(key);
+        deduped.push(message);
+    }
+
+    const selected = deduped.slice(0, RECENT_CHANGE_MAX_ITEMS * 2);
+    const lines = [];
+    let totalChars = 0;
+
+    for (const message of selected) {
+        const line =
+            (message.role === 'user' ? '用户' : 'AI') +
+            ': ' +
+            message.content;
+
+        if (
+            lines.length > 0 &&
+            totalChars + line.length + 1 > RECENT_CHANGE_CHAR_LIMIT
+        ) {
+            break;
+        }
+
+        lines.push(line);
+        totalChars += line.length + 1;
+    }
+
+    return lines.length
+        ? lines.join('\n')
+        : '（近期没有检测到明确的变化信息）';
+}
+
+function buildMemoryContext(memories) {
+    if (!Array.isArray(memories) || !memories.length) {
+        return '（暂无长期记忆）';
+    }
+
+    // 优先使用最新创建的记忆。旧记忆仍然保存在数据库中，
+    // 但不再每次把全部历史记忆塞进 system prompt。
+    const selected = memories
+        .slice(-MEMORY_CONTEXT_MAX_ITEMS)
+        .reverse();
+
+    const lines = [];
+    let totalChars = 0;
+
+    for (const memory of selected) {
+        const summary = sanitizeContent(memory?.summary).trim();
+
+        if (!summary) {
+            continue;
+        }
+
+        const line = '- ' + summary;
+
+        if (
+            lines.length > 0 &&
+            totalChars + line.length + 1 > MEMORY_CONTEXT_CHAR_LIMIT
+        ) {
+            break;
+        }
+
+        lines.push(line);
+        totalChars += line.length + 1;
+    }
+
+    return lines.length
+        ? lines.join('\n')
+        : '（暂无长期记忆）';
+}
+
+// ==================================================
 // 长期记忆压缩
 // ==================================================
 
@@ -1609,7 +1847,7 @@ app.post(
             }
 
             // ==================================================
-            // ⑤ 加载长期记忆
+            // ⑤ 加载长期记忆 + 整理近期上下文
             // ==================================================
 
             const memResult =
@@ -1617,7 +1855,7 @@ app.post(
                     'memories',
                     {
                         select:
-                            'summary',
+                            'summary,created_at',
 
                         session_id:
                             'eq.' + sid,
@@ -1631,20 +1869,40 @@ app.post(
                 memResult.data || [];
 
             const memoryText =
-                memories.length > 0
-                    ? memories
-                        .map(
-                            m =>
-                                '- ' +
-                                m.summary
-                        )
-                        .join('\n')
-                    : '（暂无长期记忆）';
+                buildMemoryContext(memories);
+
+            // 不再把全部长期记忆注入 system prompt。
+            // 当前对话优先，长期记忆只作为辅助背景。
+            console.log(
+                '🧠 长期记忆: ' +
+                memories.length +
+                ' 条，实际注入: ' +
+                memoryText.split('\n').filter(Boolean).length +
+                ' 条'
+            );
+
+            const recentMessages =
+                trimMessagesByCharBudget(
+                    allMessages.slice(0, -1).slice(-RECENT_CONTEXT_MESSAGE_LIMIT),
+                    RECENT_CONTEXT_CHAR_LIMIT
+                );
+
+            const recentChangeText =
+                buildRecentChangeContext(
+                    allMessages
+                );
 
             console.log(
-                '🧠 加载 ' +
-                memories.length +
-                ' 条长期记忆'
+                '💬 近期对话: ' +
+                recentMessages.length +
+                ' 条'
+            );
+
+            console.log(
+                '🔄 最近变化上下文: ' +
+                (recentChangeText === '（近期没有检测到明确的变化信息）'
+                    ? '无'
+                    : '已提取')
             );
 
             // ==================================================
@@ -1653,7 +1911,17 @@ app.post(
 
             const systemPrompt =
                 '\n\n你是沈凛，温柔体贴的男友。\n\n' +
-                '请自然地结合长期记忆和当前对话回复用户，不要编造事实。\n\n' +
+                '请自然地结合当前对话、近期变化候选和长期记忆回复用户，不要编造事实。\n' +
+                '上下文优先级：当前用户消息 > 近期连续对话 > 近期变化补充 > 长期记忆。\n' +
+                '如果不同上下文之间出现冲突，以更新、明确的内容为准，不要拿旧记忆覆盖新信息。\n\n' +
+
+                '【近期变化候选】\n' +
+                recentChangeText +
+                '\n\n' +
+
+                '【长期记忆】\n' +
+                memoryText +
+                '\n\n' +
 
                 '【工具使用原则】\n\n' +
                 '只有当用户明确询问实时信息，或用户的当前请求明确需要某个工具完成任务时，才调用工具。\n\n' +
@@ -1696,7 +1964,7 @@ app.post(
 
                 '【Render 后端日志】\n\n' +
                 'render_logs 是专门用于排查这个 AI 后端本身的问题。\n\n' +
-                '只有在以下情况才使用：\n\n' +
+                '只有在以下情况才使用：\n' +
                 '用户明确让你检查后端、Render、日志或报错。\n' +
                 '当前请求明显是在排查服务异常。\n' +
                 '你已经发现请求可能因为后端故障而失败，需要进一步确认。\n\n' +
@@ -1707,11 +1975,7 @@ app.post(
                 '不要为了确认普通聊天状态而读取 Render 日志。\n\n' +
                 'Render 日志返回的是技术运行信息，不要把它当成用户聊天内容。\n\n' +
                 '不要根据日志猜测用户的私人信息。\n\n' +
-                '如果日志中出现疑似 token、API key、密码、Authorization 等敏感信息，不要在最终回答中复述。\n\n' +
-
-                '〖长期记忆〗\n' +
-                memoryText +
-                '\n';
+                '如果日志中出现疑似 token、API key、密码、Authorization 等敏感信息，不要在最终回答中复述。\n';
 
             // ==================================================
             // ⑦ 构造真正发给模型的 messages
@@ -1719,29 +1983,32 @@ app.post(
 
             let modelMessages = [];
 
-            if (
-                Array.isArray(
-                    req.body.messages
-                )
-            ) {
-                modelMessages =
-                    req.body.messages.map(
-                        (m, index) => {
+            // 如果这是 MCP 工具续接请求，必须保留客户端提供的
+            // tool_calls / tool 结果上下文，否则模型无法继续工具流程。
+            const hasToolContext =
+                clientMessages.some(
+                    m =>
+                        m &&
+                        (
+                            m.role === 'tool' ||
+                            Array.isArray(m.tool_calls)
+                        )
+                );
 
+            if (hasToolContext) {
+                modelMessages =
+                    clientMessages.map(
+                        (m, index) => {
                             if (
                                 !m ||
-                                typeof m !==
-                                    'object'
+                                typeof m !== 'object'
                             ) {
                                 return m;
                             }
 
                             if (
-                                m.role ===
-                                    'user' &&
-                                index ===
-                                    req.body.messages.length -
-                                    1
+                                m.role === 'user' &&
+                                index === clientMessages.length - 1
                             ) {
                                 return {
                                     ...m,
@@ -1751,41 +2018,45 @@ app.post(
                             }
 
                             if (
-                                m.role ===
-                                    'user' ||
-                                m.role ===
-                                    'assistant'
+                                m.role === 'user' ||
+                                m.role === 'assistant'
                             ) {
                                 return {
                                     ...m,
                                     content:
-                                        sanitizeContent(
-                                            m.content
-                                        )
+                                        sanitizeContent(m.content)
                                 };
                             }
 
                             return m;
                         }
                     );
-            } else {
-                modelMessages = [
-                    {
-                        role:
-                            'user',
 
-                        content:
-                            messageForModel
-                    }
-                ];
+                console.log(
+                    '🛠️ 检测到工具续接，保留客户端工具上下文: ' +
+                    modelMessages.length +
+                    ' 条'
+                );
+            } else {
+                modelMessages =
+                    recentMessages.map(
+                        m => ({
+                            role: m.role,
+                            content: m.content
+                        })
+                    );
+
+                // 当前请求的真实用户消息永远放在最后。
+                // 这样即使 Supabase 查询存在极短暂延迟，也不会漏掉当前消息。
+                modelMessages.push({
+                    role: 'user',
+                    content: messageForModel
+                });
             }
 
             modelMessages.unshift({
-                role:
-                    'system',
-
-                content:
-                    systemPrompt
+                role: 'system',
+                content: systemPrompt
             });
 
             console.log(
@@ -1794,27 +2065,7 @@ app.post(
                 ' 条'
             );
 
-            console.log(
-                '🛠️ 转发工具 ' +
-                (
-                    Array.isArray(
-                        req.body.tools
-                    )
-                        ? req.body.tools.length
-                        : 0
-                ) +
-                ' 个'
-            );
-
-            console.log(
-                '🛠️ tool_choice: ' +
-                (
-                    req.body.tool_choice ||
-                    '未提供'
-                )
-            );
-
-            // ==================================================
+// ==================================================
             // ⑧ 构造工具列表
             // ==================================================
 
