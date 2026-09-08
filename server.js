@@ -1039,13 +1039,22 @@ async function supabaseUpdate(
 // 上下文整理：近期对话 + 最近变化候选
 // ==================================================
 
-const RECENT_CONTEXT_MESSAGE_LIMIT = 20;
-const RECENT_CONTEXT_CHAR_LIMIT = 8000;
-const RECENT_CHANGE_SCAN_LIMIT = 80;
-const RECENT_CHANGE_MAX_ITEMS = 8;
-const RECENT_CHANGE_CHAR_LIMIT = 5000;
-const MEMORY_CONTEXT_MAX_ITEMS = 20;
-const MEMORY_CONTEXT_CHAR_LIMIT = 7000;
+const RECENT_CONTEXT_MESSAGE_LIMIT = 36;
+const RECENT_CONTEXT_CHAR_LIMIT = 12000;
+const RECENT_CHANGE_SCAN_LIMIT = 100;
+const RECENT_CHANGE_MAX_ITEMS = 6;
+const RECENT_CHANGE_CHAR_LIMIT = 3500;
+const MEMORY_CONTEXT_MAX_ITEMS = 30;
+const MEMORY_CONTEXT_CHAR_LIMIT = 6000;
+
+// ==================================================
+// 近期上下文策略
+//
+// 目标不是简单地“只取最后 N 条”，而是：
+// 1. 给模型一段足够连续的最近对话，保持聊天语气和上下文；
+// 2. 再从更早但仍然较近的历史里挑选“可能改变后续对话”的片段；
+// 3. 长期记忆作为辅助背景，不让它盖过真正的近期聊天。
+// ==================================================
 
 const CHANGE_MARKERS = [
     '现在', '以后', '之前', '刚刚', '最近', '今天', '昨天', '明天',
@@ -1115,15 +1124,44 @@ function isLikelyChangeMessage(message) {
 
     const text = sanitizeContent(message.content).trim();
 
-    if (!text) {
-        return false;
-    }
-
-    if (text.length < 8) {
+    if (!text || text.length < 8) {
         return false;
     }
 
     return CHANGE_MARKERS.some(marker => text.includes(marker));
+}
+
+function getChangeScore(message, distanceFromRecent) {
+    const text = sanitizeContent(message?.content).trim();
+
+    if (!text) {
+        return -Infinity;
+    }
+
+    let score = 0;
+
+    // 明确表达决定、变化、长期偏好的话，优先级更高。
+    for (const marker of CHANGE_MARKERS) {
+        if (text.includes(marker)) {
+            score += 3;
+        }
+    }
+
+    // 用户自己说得比较完整的消息，比单句闲聊更值得作为变化候选。
+    if (text.length >= 40) {
+        score += 1;
+    }
+    if (text.length >= 100) {
+        score += 1;
+    }
+
+    // 越靠近当前对话，优先级越高。
+    score += Math.max(
+        0,
+        4 - Math.floor(distanceFromRecent / 12)
+    );
+
+    return score;
 }
 
 function buildRecentChangeContext(messages) {
@@ -1131,84 +1169,130 @@ function buildRecentChangeContext(messages) {
         ? messages.slice(0, -1)
         : [];
 
-    // 近期对话已经会直接送给模型，因此变化补充只扫描
-    // “近期对话窗口”之外的较新历史，避免同一内容重复占用上下文。
+    if (sourceMessages.length <= RECENT_CONTEXT_MESSAGE_LIMIT) {
+        return '（近期没有需要额外补充的历史变化信息）';
+    }
+
+    // 最近 36 条已经作为连续对话直接发送。
+    // 这里只看它之前的较近历史，避免把同一段内容重复塞两遍。
     const recentBoundary = Math.max(
         0,
         sourceMessages.length - RECENT_CONTEXT_MESSAGE_LIMIT
     );
 
-    const source = sourceMessages
-        .slice(
-            Math.max(
-                0,
-                sourceMessages.length - RECENT_CHANGE_SCAN_LIMIT
-            ),
-            recentBoundary
-        );
+    const scanStart = Math.max(
+        0,
+        recentBoundary - RECENT_CHANGE_SCAN_LIMIT
+    );
+
+    const source = sourceMessages.slice(
+        scanStart,
+        recentBoundary
+    );
 
     const candidates = [];
 
-    for (let i = source.length - 1; i >= 0; i--) {
+    for (let i = 0; i < source.length; i++) {
         const message = source[i];
 
-        if (!isLikelyChangeMessage(message)) {
+        if (!message || message.role !== 'user') {
             continue;
         }
 
         const current = normalizeHistoryMessage(message);
-
         if (!current) {
             continue;
         }
 
-        // 尽量把该条用户消息前后的 AI 回复一起带上，避免模型只看到
-        // “发生了什么”，却不知道最后得出了什么结论。
-        const nearby = [];
-        const sourceIndex = source.indexOf(message);
+        const distanceFromRecent = source.length - 1 - i;
+        const explicitChange = isLikelyChangeMessage(message);
+        const score = getChangeScore(
+            message,
+            distanceFromRecent
+        );
 
-        if (sourceIndex > 0) {
-            const previous = normalizeHistoryMessage(source[sourceIndex - 1]);
-            if (previous && previous.role === 'assistant') {
-                nearby.push(previous);
-            }
-        }
-
-        nearby.push(current);
-
-        if (sourceIndex + 1 < source.length) {
-            const next = normalizeHistoryMessage(source[sourceIndex + 1]);
-            if (next && next.role === 'assistant') {
-                nearby.push(next);
-            }
-        }
-
-        candidates.push(...nearby);
-
-        if (candidates.length >= RECENT_CHANGE_MAX_ITEMS * 3) {
-            break;
-        }
-    }
-
-    if (!candidates.length) {
-        return '（近期没有检测到明确的变化信息）';
-    }
-
-    const deduped = [];
-    const seen = new Set();
-
-    for (const message of candidates) {
-        const key = message.role + '|' + message.content;
-
-        if (seen.has(key)) {
+        // 普通闲聊不主动抽出来；但明确变化/决定/偏好仍然会被选中。
+        if (!explicitChange && score < 4) {
             continue;
         }
 
-        seen.add(key);
-        deduped.push(message);
+        const block = [];
+
+        // 尽量把前后的 AI 回复一起保留，让模型知道这段变化最后如何被回应。
+        if (i > 0) {
+            const previous = normalizeHistoryMessage(source[i - 1]);
+            if (previous && previous.role === 'assistant') {
+                block.push(previous);
+            }
+        }
+
+        block.push(current);
+
+        if (i + 1 < source.length) {
+            const next = normalizeHistoryMessage(source[i + 1]);
+            if (next && next.role === 'assistant') {
+                block.push(next);
+            }
+        }
+
+        candidates.push({
+            score,
+            index: i,
+            block
+        });
     }
 
-    const selected = deduped.slice(0, RECENT_CHANGE_MAX_ITEMS * 2);
+    if (!candidates.length) {
+        return '（近期没有需要额外补充的历史变化信息）';
+    }
+
+    // 综合“是否明确变化”和“离现在有多近”，而不是单纯取最早/最新几条。
+    candidates.sort((a, b) => {
+        if (b.score !== a.score) {
+            return b.score - a.score;
+        }
+
+        return b.index - a.index;
+    });
+
+    const selectedBlocks = candidates.slice(
+        0,
+        RECENT_CHANGE_MAX_ITEMS
+    );
+
+    const selected = [];
+    const seen = new Set();
+
+    for (const candidate of selectedBlocks) {
+        for (const message of candidate.block) {
+            const key =
+                message.role + '|' + message.content;
+
+            if (seen.has(key)) {
+                continue;
+            }
+
+            seen.add(key);
+            selected.push(message);
+        }
+    }
+
+    // 按原始聊天顺序重新排列，避免模型看到跳来跳去的历史。
+    selected.sort((a, b) => {
+        const ai = source.findIndex(
+            m =>
+                m.role === a.role &&
+                sanitizeContent(m.content) === a.content
+        );
+        const bi = source.findIndex(
+            m =>
+                m.role === b.role &&
+                sanitizeContent(m.content) === b.content
+        );
+
+        return ai - bi;
+    });
+
     const lines = [];
     let totalChars = 0;
 
@@ -1231,7 +1315,7 @@ function buildRecentChangeContext(messages) {
 
     return lines.length
         ? lines.join('\n')
-        : '（近期没有检测到明确的变化信息）';
+        : '（近期没有需要额外补充的历史变化信息）';
 }
 
 function buildMemoryContext(memories) {
@@ -2061,7 +2145,9 @@ app.post(
 
             const recentMessages =
                 trimMessagesByCharBudget(
-                    allMessages.slice(0, -1).slice(-RECENT_CONTEXT_MESSAGE_LIMIT),
+                    allMessages
+                        .slice(0, -1)
+                        .slice(-RECENT_CONTEXT_MESSAGE_LIMIT),
                     RECENT_CONTEXT_CHAR_LIMIT
                 );
 
@@ -2071,7 +2157,7 @@ app.post(
                 );
 
             console.log(
-                '💬 近期对话: ' +
+                '💬 近期连续对话: ' +
                 recentMessages.length +
                 ' 条'
             );
@@ -2096,7 +2182,7 @@ app.post(
 
             const systemPrompt =
                 systemPromptCore +
-                '【近期变化】\n' +
+                '【近期连续对话之外的近期变化】\n' +
                 recentChangeText +
                 '\n\n' +
                 '【长期记忆】\n' +
