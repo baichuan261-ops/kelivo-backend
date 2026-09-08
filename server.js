@@ -1164,17 +1164,17 @@ function getChangeScore(message, distanceFromRecent) {
     return score;
 }
 
-function buildRecentChangeContext(messages) {
+function buildRecentChangeMessages(messages) {
     const sourceMessages = Array.isArray(messages)
         ? messages.slice(0, -1)
         : [];
 
     if (sourceMessages.length <= RECENT_CONTEXT_MESSAGE_LIMIT) {
-        return '（近期没有需要额外补充的历史变化信息）';
+        return [];
     }
 
-    // 最近 36 条已经作为连续对话直接发送。
-    // 这里只看它之前的较近历史，避免把同一段内容重复塞两遍。
+    // 最近 36 条已经作为真正的 user/assistant 消息直接发送。
+    // 这里只从它之前的较近历史中挑选明确的“变化/决定/偏好”。
     const recentBoundary = Math.max(
         0,
         sourceMessages.length - RECENT_CONTEXT_MESSAGE_LIMIT
@@ -1211,25 +1211,18 @@ function buildRecentChangeContext(messages) {
             distanceFromRecent
         );
 
-        // 普通闲聊不主动抽出来；但明确变化/决定/偏好仍然会被选中。
         if (!explicitChange && score < 4) {
             continue;
         }
 
-        const block = [];
-
-        // 尽量把前后的 AI 回复一起保留，让模型知道这段变化最后如何被回应。
-        if (i > 0) {
-            const previous = normalizeHistoryMessage(source[i - 1]);
-            if (previous && previous.role === 'assistant') {
-                block.push(previous);
-            }
-        }
-
-        block.push(current);
+        // 只把“用户消息 + 紧跟着的 AI 回复”作为一个历史片段。
+        // 不再把历史内容拼成“用户：... / AI：...”字符串塞进 system prompt。
+        // 这样模型可以直接依靠真正的 role 字段判断谁说了什么。
+        const block = [current];
 
         if (i + 1 < source.length) {
             const next = normalizeHistoryMessage(source[i + 1]);
+
             if (next && next.role === 'assistant') {
                 block.push(next);
             }
@@ -1243,10 +1236,9 @@ function buildRecentChangeContext(messages) {
     }
 
     if (!candidates.length) {
-        return '（近期没有需要额外补充的历史变化信息）';
+        return [];
     }
 
-    // 综合“是否明确变化”和“离现在有多近”，而不是单纯取最早/最新几条。
     candidates.sort((a, b) => {
         if (b.score !== a.score) {
             return b.score - a.score;
@@ -1277,7 +1269,7 @@ function buildRecentChangeContext(messages) {
         }
     }
 
-    // 按原始聊天顺序重新排列，避免模型看到跳来跳去的历史。
+    // 恢复历史原本的时间顺序。
     selected.sort((a, b) => {
         const ai = source.findIndex(
             m =>
@@ -1293,30 +1285,43 @@ function buildRecentChangeContext(messages) {
         return ai - bi;
     });
 
-    const lines = [];
+    // 额外历史也使用真正的 role，但仍然限制总字符数。
+    const result = [];
     let totalChars = 0;
 
     for (const message of selected) {
-        const line =
-            (message.role === 'user' ? '用户' : 'AI') +
-            ': ' +
-            message.content;
+        const extra =
+            message.content.length + 20;
 
         if (
-            lines.length > 0 &&
-            totalChars + line.length + 1 > RECENT_CHANGE_CHAR_LIMIT
+            result.length > 0 &&
+            totalChars + extra > RECENT_CHANGE_CHAR_LIMIT
         ) {
             break;
         }
 
-        lines.push(line);
-        totalChars += line.length + 1;
+        result.push(message);
+        totalChars += extra;
     }
 
-    return lines.length
-        ? lines.join('\n')
-        : '（近期没有需要额外补充的历史变化信息）';
+    return result;
 }
+
+function formatRecentChangeForLog(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return '（近期没有需要额外补充的历史变化信息）';
+    }
+
+    return messages
+        .map(
+            message =>
+                (message.role === 'user' ? '用户' : 'AI') +
+                ': ' +
+                message.content
+        )
+        .join('\n');
+}
+
 
 function buildMemoryContext(memories) {
     if (!Array.isArray(memories) || !memories.length) {
@@ -2151,9 +2156,14 @@ app.post(
                     RECENT_CONTEXT_CHAR_LIMIT
                 );
 
-            const recentChangeText =
-                buildRecentChangeContext(
+            const recentChangeMessages =
+                buildRecentChangeMessages(
                     allMessages
+                );
+
+            const recentChangeText =
+                formatRecentChangeForLog(
+                    recentChangeMessages
                 );
 
             console.log(
@@ -2164,9 +2174,9 @@ app.post(
 
             console.log(
                 '🔄 最近变化上下文: ' +
-                (recentChangeText === '（近期没有检测到明确的变化信息）'
+                (recentChangeMessages.length === 0
                     ? '无'
-                    : '已提取')
+                    : '已提取 ' + recentChangeMessages.length + ' 条历史消息')
             );
 
             // ==================================================
@@ -2175,6 +2185,10 @@ app.post(
             const systemPromptCore =
                 '\n\n你是沈凛，温柔体贴的男友。\n' +
                 '请自然地回复用户，不要编造事实。\n' +
+                '【身份与对话角色】\n' +
+                '后续消息中的 role 字段是唯一可靠的说话者标记：role=user 表示用户说的话，role=assistant 表示你自己以前说的话。\n' +
+                '不要把 assistant 历史消息当成用户说过的话，也不要因为用户和你使用了相似的词语、语气或口头禅，就交换双方身份。\n' +
+                '历史对话只是为了恢复上下文；不要刻意模仿用户的措辞、口头禅或表达习惯。保持你自己的自然说话方式，同时结合真实的对话上下文。\n' +
                 '【工具使用】\n' +
                 '只在用户明确要求或确实需要实时信息时才调用工具，不要主动查岗。\n' +
                 '工具数据只是背景信息，回复中不要罗列数据报告。\n' +
@@ -2182,9 +2196,6 @@ app.post(
 
             const systemPrompt =
                 systemPromptCore +
-                '【近期连续对话之外的近期变化】\n' +
-                recentChangeText +
-                '\n\n' +
                 '【长期记忆】\n' +
                 memoryText +
                 '\n';
@@ -2255,13 +2266,40 @@ app.post(
                     ' 条）'
                 );
             } else {
-                modelMessages =
-                    recentMessages.map(
+                // 较早的“最近变化”也作为真正的 user/assistant role 消息发送。
+                // 以前这里把它们拼成 system prompt 中的“用户：... / AI：...”文本，
+                // 容易让模型在长上下文中把说话者身份搞混。
+                if (recentChangeMessages.length > 0) {
+                    modelMessages.push({
+                        role: 'system',
+                        content:
+                            '以下是较早的历史对话片段，仅用于补充上下文。' +
+                            '其中 user 是用户，assistant 是你自己。' +
+                            '请严格按照 role 判断说话者，不要把其中的 assistant 内容归到用户名下。'
+                    });
+
+                    for (const message of recentChangeMessages) {
+                        modelMessages.push({
+                            role: message.role,
+                            content: message.content
+                        });
+                    }
+
+                    modelMessages.push({
+                        role: 'system',
+                        content:
+                            '以上是较早的历史补充。下面开始按原顺序提供最近的连续对话。'
+                    });
+                }
+
+                modelMessages.push(
+                    ...recentMessages.map(
                         m => ({
                             role: m.role,
                             content: m.content
                         })
-                    );
+                    )
+                );
 
                 // 当前请求的真实用户消息永远放在最后。
                 // 这样即使 Supabase 查询存在极短暂延迟，也不会漏掉当前消息。
