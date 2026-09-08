@@ -134,6 +134,22 @@ const MODEL_NAME =
     process.env.MODEL_NAME ||
     'claude-3.5-sonnet';
 
+// 中转 API 单次请求最长等待时间。
+// 默认 240 秒，给 Render 的约 300 秒请求生命周期留出余量。
+const UPSTREAM_TIMEOUT_MS =
+    Math.max(
+        Number(process.env.UPSTREAM_TIMEOUT_MS) || 240000,
+        10000
+    );
+
+// 记忆压缩不是正常聊天链路的一部分，使用更短的超时时间，
+// 避免超过 200 条消息时把一次正常聊天卡住很久。
+const MEMORY_COMPRESSION_TIMEOUT_MS =
+    Math.max(
+        Number(process.env.MEMORY_COMPRESSION_TIMEOUT_MS) || 60000,
+        10000
+    );
+
 // ==================================================
 // Render 日志配置
 // ==================================================
@@ -299,6 +315,131 @@ function isTitleRequest(body) {
         text.includes(
             'summarize the conversation between user and assistant into a short title'
         )
+    );
+}
+
+// ==================================================
+// 中转 API 故障诊断辅助函数
+// ==================================================
+
+function getSafeUpstreamTarget() {
+    try {
+        const url = new URL(TRANSFER_API_URL);
+        const port =
+            url.port ||
+            (url.protocol === 'https:' ? '443' : '80');
+
+        return (
+            url.protocol +
+            '//' +
+            url.hostname +
+            ':' +
+            port
+        );
+    } catch (e) {
+        return '[无效或未配置的 TRANSFER_API_URL]';
+    }
+}
+
+function getFetchCauseDetails(error) {
+    const cause = error?.cause;
+
+    return {
+        name: error?.name || '-',
+        code: error?.code || '-',
+        message: error?.message || '-',
+        causeName: cause?.name || '-',
+        causeCode: cause?.code || '-',
+        causeErrno: cause?.errno || '-',
+        causeSyscall: cause?.syscall || '-',
+        causeHostname: cause?.hostname || '-',
+        causePort: cause?.port || '-',
+        causeMessage: cause?.message || '-'
+    };
+}
+
+function parseUpstreamError(errorText) {
+    const fallback = {
+        code: '-',
+        type: '-',
+        message: '-'
+    };
+
+    if (typeof errorText !== 'string' || !errorText.trim()) {
+        return fallback;
+    }
+
+    try {
+        const parsed = JSON.parse(errorText);
+        const error = parsed?.error || parsed;
+
+        return {
+            code:
+                error?.code ||
+                error?.status ||
+                '-',
+            type:
+                error?.type ||
+                '-',
+            message:
+                error?.message ||
+                '-'
+        };
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function logPromptComposition(
+    requestId,
+    messages,
+    tools,
+    systemPrompt,
+    memoryText,
+    recentChangeText,
+    messageForModel
+) {
+    const list = Array.isArray(messages)
+        ? messages
+        : [];
+
+    const roleCounts = {};
+    let totalChars = 0;
+    let toolChars = 0;
+
+    for (const message of list) {
+        const role = message?.role || 'unknown';
+        const content = sanitizeContent(message?.content);
+        const chars = content.length;
+
+        roleCounts[role] =
+            (roleCounts[role] || 0) + 1;
+        totalChars += chars;
+
+        if (role === 'tool') {
+            toolChars += chars;
+        }
+    }
+
+    console.log(
+        '🔎 Prompt组成 request=' +
+        requestId +
+        ' systemChars=' +
+        String(systemPrompt || '').length +
+        ' memoryChars=' +
+        String(memoryText || '').length +
+        ' recentChangeChars=' +
+        String(recentChangeText || '').length +
+        ' currentUserChars=' +
+        String(sanitizeContent(messageForModel)).length +
+        ' totalMessageChars=' +
+        totalChars +
+        ' toolResultChars=' +
+        toolChars +
+        ' roles=' +
+        JSON.stringify(roleCounts) +
+        ' toolDefs=' +
+        (Array.isArray(tools) ? tools.length : 0)
     );
 }
 
@@ -1193,23 +1334,43 @@ async function compressMemories(
             oldText +
             '\n';
 
-        const response =
-            await fetch(
-                TRANSFER_API_URL,
-                {
-                    method: 'POST',
+        const memoryController =
+            new AbortController();
 
-                    headers: {
-                        'Content-Type':
-                            'application/json',
+        const memoryTimeout =
+            setTimeout(
+                () => {
+                    console.log(
+                        '⏰ 记忆压缩中转 API 超时 timeout=' +
+                        MEMORY_COMPRESSION_TIMEOUT_MS +
+                        'ms'
+                    );
 
-                        'Authorization':
-                            'Bearer ' +
-                            TRANSFER_API_KEY
-                    },
+                    memoryController.abort();
+                },
+                MEMORY_COMPRESSION_TIMEOUT_MS
+            );
 
-                    body:
-                        JSON.stringify({
+        let response;
+
+        try {
+            response =
+                await fetch(
+                    TRANSFER_API_URL,
+                    {
+                        method: 'POST',
+
+                        headers: {
+                            'Content-Type':
+                                'application/json',
+
+                            'Authorization':
+                                'Bearer ' +
+                                TRANSFER_API_KEY
+                        },
+
+                        body:
+                            JSON.stringify({
                             model:
                                 MODEL_NAME,
 
@@ -1231,9 +1392,26 @@ async function compressMemories(
 
                             max_tokens:
                                 2048
-                        })
-                }
+                        }),
+
+                        signal:
+                            memoryController.signal
+                    }
+                );
+        } catch (e) {
+            clearTimeout(memoryTimeout);
+
+            console.log(
+                '❌ 记忆压缩中转 API 异常:',
+                JSON.stringify(
+                    getFetchCauseDetails(e)
+                )
             );
+
+            return;
+        } finally {
+            clearTimeout(memoryTimeout);
+        }
 
         if (!response.ok) {
             const errorText =
@@ -1908,15 +2086,22 @@ app.post(
             // ==================================================
             // ⑥ System Prompt
             // ==================================================
-          const systemPrompt =
-    '\n\n你是沈凛，温柔体贴的男友。\n' +
-    '请自然地回复用户，不要编造事实。\n' +
-    '【近期变化】\n' + recentChangeText + '\n\n' +
-    '【长期记忆】\n' + memoryText + '\n';
+            const systemPromptCore =
+                '\n\n你是沈凛，温柔体贴的男友。\n' +
+                '请自然地回复用户，不要编造事实。\n' +
                 '【工具使用】\n' +
                 '只在用户明确要求或确实需要实时信息时才调用工具，不要主动查岗。\n' +
                 '工具数据只是背景信息，回复中不要罗列数据报告。\n' +
                 'render_logs 只在用户明确要求排查后端问题时使用。\n';
+
+            const systemPrompt =
+                systemPromptCore +
+                '【近期变化】\n' +
+                recentChangeText +
+                '\n\n' +
+                '【长期记忆】\n' +
+                memoryText +
+                '\n';
             // ==================================================
             // ⑦ 构造真正发给模型的 messages
             // ==================================================
@@ -2005,6 +2190,16 @@ app.post(
                 content: systemPrompt
             });
 
+            logPromptComposition(
+                requestId,
+                modelMessages,
+                req.body.tools,
+                systemPrompt,
+                memoryText,
+                recentChangeText,
+                messageForModel
+            );
+
             console.log(
                 '📨 转发消息 ' +
                 modelMessages.length +
@@ -2090,22 +2285,28 @@ app.post(
                         req.body.thinking;
                 }
 
+                const serializedBody =
+                    JSON.stringify(upstreamBody);
+
+                const bodyBytes =
+                    Buffer.byteLength(
+                        serializedBody,
+                        'utf8'
+                    );
+
                 const controller =
                     new AbortController();
 
-                let abortHandled =
-                    false;
+                let clientAborted = false;
+                let upstreamTimedOut = false;
 
                 const onClientAbort =
                     () => {
-                        if (
-                            abortHandled
-                        ) {
+                        if (clientAborted) {
                             return;
                         }
 
-                        abortHandled =
-                            true;
+                        clientAborted = true;
 
                         console.log(
                             '⚠️ 客户端已断开，取消中转 API 请求 request=' +
@@ -2115,6 +2316,28 @@ app.post(
                         controller.abort();
                     };
 
+                const timeoutHandle =
+                    setTimeout(
+                        () => {
+                            if (clientAborted) {
+                                return;
+                            }
+
+                            upstreamTimedOut = true;
+
+                            console.log(
+                                '⏰ 中转 API 请求超时 request=' +
+                                requestId +
+                                ' timeout=' +
+                                UPSTREAM_TIMEOUT_MS +
+                                'ms'
+                            );
+
+                            controller.abort();
+                        },
+                        UPSTREAM_TIMEOUT_MS
+                    );
+
                 req.once(
                     'aborted',
                     onClientAbort
@@ -2122,6 +2345,18 @@ app.post(
 
                 const upstreamStart =
                     Date.now();
+
+                console.log(
+                    '🌐 中转目标 request=' +
+                    requestId +
+                    ' target=' +
+                    getSafeUpstreamTarget() +
+                    ' bodyBytes=' +
+                    bodyBytes +
+                    ' timeout=' +
+                    UPSTREAM_TIMEOUT_MS +
+                    'ms'
+                );
 
                 console.log(
                     '🚀 中转 API fetch 开始 request=' +
@@ -2148,9 +2383,7 @@ app.post(
                                 },
 
                                 body:
-                                    JSON.stringify(
-                                        upstreamBody
-                                    ),
+                                    serializedBody,
 
                                 signal:
                                     controller.signal
@@ -2170,17 +2403,26 @@ app.post(
                         'ms'
                     );
 
-                    if (
-                        !response.ok
-                    ) {
+                    if (!response.ok) {
                         const errorText =
                             await response.text();
+
+                        const upstreamError =
+                            parseUpstreamError(
+                                errorText
+                            );
 
                         console.log(
                             '❌ 中转 API 错误 request=' +
                             requestId +
-                            ':',
-                            errorText
+                            ' status=' +
+                            response.status +
+                            ' type=' +
+                            upstreamError.type +
+                            ' code=' +
+                            upstreamError.code +
+                            ' message=' +
+                            upstreamError.message
                         );
 
                         const error =
@@ -2193,6 +2435,34 @@ app.post(
 
                         error.upstreamError =
                             errorText;
+
+                        error.upstreamType =
+                            upstreamError.type;
+
+                        error.upstreamCode =
+                            upstreamError.code;
+
+                        error.upstreamMessage =
+                            upstreamError.message;
+
+                        if (
+                            response.status === 400 &&
+                            (
+                                upstreamError.code ===
+                                    'prompt_blocked' ||
+                                upstreamError.type ===
+                                    'prompt_blocked'
+                            )
+                        ) {
+                            error.promptBlocked = true;
+
+                            console.log(
+                                '🚫 Gemini/中转 API 拒绝 Prompt request=' +
+                                requestId +
+                                ' reason=' +
+                                upstreamError.message
+                            );
+                        }
 
                         throw error;
                     }
@@ -2214,13 +2484,9 @@ app.post(
                     return result;
 
                 } catch (e) {
-                    if (
-                        req.aborted ||
-                        e.name ===
-                            'AbortError'
-                    ) {
+                    if (clientAborted || req.aborted) {
                         console.log(
-                            '⚠️ 中转 API 请求被客户端中止 request=' +
+                            '⚠️ 中转 API 请求因客户端断开而取消 request=' +
                             requestId +
                             ' elapsed=' +
                             (
@@ -2230,24 +2496,41 @@ app.post(
                             'ms'
                         );
 
-                        e.clientAborted =
-                            true;
+                        e.clientAborted = true;
+                    } else if (upstreamTimedOut) {
+                        console.log(
+                            '⏰ 中转 API 超时结束 request=' +
+                            requestId +
+                            ' elapsed=' +
+                            (
+                                Date.now() -
+                                upstreamStart
+                            ) +
+                            'ms'
+                        );
+
+                        e.upstreamTimeout = true;
+                        e.timeoutMs =
+                            UPSTREAM_TIMEOUT_MS;
+                    } else if (e?.promptBlocked) {
+                        // 已经在 HTTP 错误分支中记录了明确的上游拒绝原因。
                     } else {
                         console.log(
                             '❌ 中转 fetch 异常 request=' +
-                            requestId +
-                            ' name=' +
-                            (e.name || '-') +
-                            ' code=' +
-                            (e.code || '-') +
-                            ' message=' +
-                            (e.message || e)
+                            requestId,
+                            JSON.stringify(
+                                getFetchCauseDetails(e)
+                            )
                         );
+
+                        e.upstreamFetchError = true;
                     }
 
                     throw e;
 
                 } finally {
+                    clearTimeout(timeoutHandle);
+
                     req.removeListener(
                         'aborted',
                         onClientAbort
@@ -2280,7 +2563,77 @@ app.post(
                     return;
                 }
 
-                throw e;
+                // 如果上游明确因为 Prompt 内容被拦截，
+                // 先只移除我们自动注入的“近期变化 + 长期记忆”。
+                // 当前用户消息仍然保留；如果当前消息本身被拦截，
+                // 这次重试仍会被上游拒绝，不会绕过安全策略。
+                if (
+                    e?.promptBlocked &&
+                    !req.aborted
+                ) {
+                    console.log(
+                        '🧹 Prompt blocked，尝试移除历史记忆上下文后重试 request=' +
+                        requestId
+                    );
+
+                    const fallbackSystemPrompt =
+                        systemPromptCore;
+
+                    const fallbackMessages =
+                        modelMessages.map(
+                            message => {
+                                if (
+                                    message?.role === 'system'
+                                ) {
+                                    return {
+                                        ...message,
+                                        content:
+                                            fallbackSystemPrompt
+                                    };
+                                }
+
+                                return message;
+                            }
+                        );
+
+                    logPromptComposition(
+                        requestId,
+                        fallbackMessages,
+                        req.body.tools,
+                        fallbackSystemPrompt,
+                        '（已移除）',
+                        '（已移除）',
+                        messageForModel
+                    );
+
+                    try {
+                        data =
+                            await callUpstream(
+                                fallbackMessages
+                            );
+
+                        console.log(
+                            '✅ 移除历史上下文后重试成功 request=' +
+                            requestId
+                        );
+                    } catch (fallbackError) {
+                        if (
+                            req.aborted ||
+                            fallbackError?.clientAborted
+                        ) {
+                            console.log(
+                                '⚠️ Prompt fallback 期间客户端断开 request=' +
+                                requestId
+                            );
+
+                            return;
+                        }
+
+                        throw fallbackError;
+                    }
+                } else {
+                    throw e;
+                }
             }
 
             // ==================================================
@@ -2776,8 +3129,7 @@ app.post(
 
             if (
                 req.aborted ||
-                e?.clientAborted ||
-                e?.name === 'AbortError'
+                e?.clientAborted
             ) {
                 console.log(
                     '⚠️ 请求结束：客户端已断开 request=' +
@@ -2789,6 +3141,80 @@ app.post(
                     ) +
                     'ms'
                 );
+
+                return;
+            }
+
+            if (e?.upstreamTimeout) {
+                console.log(
+                    '⏰ 请求失败：中转 API 超时 request=' +
+                    requestId +
+                    ' timeout=' +
+                    (e.timeoutMs || UPSTREAM_TIMEOUT_MS) +
+                    'ms'
+                );
+
+                if (
+                    !res.headersSent &&
+                    !res.destroyed
+                ) {
+                    return res
+                        .status(504)
+                        .json({
+                            error:
+                                '中转 API 请求超时'
+                        });
+                }
+
+                return;
+            }
+
+            if (e?.promptBlocked) {
+                console.log(
+                    '🚫 请求失败：上游 Prompt 被安全策略拦截 request=' +
+                    requestId +
+                    ' status=' +
+                    (e.upstreamStatus || 400) +
+                    ' type=' +
+                    (e.upstreamType || '-') +
+                    ' code=' +
+                    (e.upstreamCode || '-') +
+                    ' message=' +
+                    (e.upstreamMessage || '-')
+                );
+
+                if (
+                    !res.headersSent &&
+                    !res.destroyed
+                ) {
+                    return res
+                        .status(400)
+                        .json({
+                            error:
+                                '请求内容被上游模型安全策略拦截'
+                        });
+                }
+
+                return;
+            }
+
+            if (e?.upstreamFetchError) {
+                console.log(
+                    '❌ 请求失败：中转 API 网络请求失败 request=' +
+                    requestId
+                );
+
+                if (
+                    !res.headersSent &&
+                    !res.destroyed
+                ) {
+                    return res
+                        .status(502)
+                        .json({
+                            error:
+                                '中转 API 网络请求失败'
+                        });
+                }
 
                 return;
             }
@@ -2809,7 +3235,10 @@ app.post(
                 !res.destroyed
             ) {
                 res
-                    .status(500)
+                    .status(
+                        e?.upstreamStatus ||
+                        500
+                    )
                     .json({
                         error:
                             e.message
