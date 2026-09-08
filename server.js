@@ -13,7 +13,7 @@ function getRequestId(req) {
 return (
 req.headers['rndr-id'] ||
 req.headers['cf-ray'] ||
-${Date.now()}-${Math.random().toString(36).slice(2, 8)}
+String(Date.now()) + '-' + Math.random().toString(36).slice(2, 8)
 );
 }
 
