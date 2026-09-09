@@ -135,86 +135,18 @@ const MODEL_NAME =
     'claude-3.5-sonnet';
 
 // 中转 API 单次请求最长等待时间。
-// 默认 240 秒，给 Render 的约 300 秒请求生命周期留出余量。
 const UPSTREAM_TIMEOUT_MS =
     Math.max(
         Number(process.env.UPSTREAM_TIMEOUT_MS) || 240000,
         10000
     );
 
-// 记忆压缩不是正常聊天链路的一部分，使用更短的超时时间，
-// 避免超过 200 条消息时把一次正常聊天卡住很久。
+// 记忆压缩不是正常聊天链路的一部分，使用更短的超时时间。
 const MEMORY_COMPRESSION_TIMEOUT_MS =
     Math.max(
         Number(process.env.MEMORY_COMPRESSION_TIMEOUT_MS) || 60000,
         10000
     );
-
-// ==================================================
-// 最终模型上下文透视（临时调试）
-//
-// 默认关闭。需要排查"AI突然学用户说话 / 身份串位"时，
-// 在 Render 环境变量加入 DEBUG_PROMPT_CONTEXT=true。
-// 日志只打印每条消息的 role + 前 500 个字符，避免把整段私密对话无限刷屏。
-// ==================================================
-
-const DEBUG_PROMPT_CONTEXT =
-    String(process.env.DEBUG_PROMPT_CONTEXT || '').toLowerCase() === 'true';
-
-function logPromptContextDebug(requestId, messages) {
-    if (!DEBUG_PROMPT_CONTEXT) {
-        return;
-    }
-
-    const list = Array.isArray(messages)
-        ? messages
-        : [];
-
-    console.log(
-        '🧪 Prompt透视开始 request=' +
-        requestId +
-        ' messageCount=' +
-        list.length
-    );
-
-    list.forEach((message, index) => {
-        const role = message?.role || 'unknown';
-        let content = sanitizeContent(message?.content);
-
-        content = content
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        if (content.length > 500) {
-            content = content.slice(0, 500) + '…';
-        }
-
-        console.log(
-            '🧪 Prompt[' +
-            index +
-            '] role=' +
-            role +
-            ' chars=' +
-            sanitizeContent(message?.content).length +
-            ' content=' +
-            content
-        );
-
-        if (Array.isArray(message?.tool_calls)) {
-            console.log(
-                '🧪 Prompt[' +
-                index +
-                '] tool_calls=' +
-                message.tool_calls.length
-            );
-        }
-    });
-
-    console.log(
-        '🧪 Prompt透视结束 request=' +
-        requestId
-    );
-}
 
 // ==================================================
 // Render 日志配置
@@ -286,6 +218,72 @@ function sanitizeContent(content) {
     }
 
     return String(content || '');
+}
+
+// ==================================================
+// 最终模型上下文透视（临时调试）
+//
+// 默认关闭。需要排查"AI突然学用户说话 / 身份串位"时，
+// 在 Render 环境变量加入 DEBUG_PROMPT_CONTEXT=true。
+// 日志只打印每条消息的 role + 前 500 个字符。
+// ==================================================
+
+const DEBUG_PROMPT_CONTEXT =
+    String(process.env.DEBUG_PROMPT_CONTEXT || '').toLowerCase() === 'true';
+
+function logPromptContextDebug(requestId, messages) {
+    if (!DEBUG_PROMPT_CONTEXT) {
+        return;
+    }
+
+    const list = Array.isArray(messages)
+        ? messages
+        : [];
+
+    console.log(
+        '🧪 Prompt透视开始 request=' +
+        requestId +
+        ' messageCount=' +
+        list.length
+    );
+
+    list.forEach((message, index) => {
+        const role = message?.role || 'unknown';
+        let content = sanitizeContent(message?.content);
+
+        content = content
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (content.length > 500) {
+            content = content.slice(0, 500) + '…';
+        }
+
+        console.log(
+            '🧪 Prompt[' +
+            index +
+            '] role=' +
+            role +
+            ' chars=' +
+            sanitizeContent(message?.content).length +
+            ' content=' +
+            content
+        );
+
+        if (Array.isArray(message?.tool_calls)) {
+            console.log(
+                '🧪 Prompt[' +
+                index +
+                '] tool_calls=' +
+                message.tool_calls.length
+            );
+        }
+    });
+
+    console.log(
+        '🧪 Prompt透视结束 request=' +
+        requestId
+    );
 }
 
 // ==================================================
@@ -1116,11 +1114,6 @@ const MEMORY_CONTEXT_CHAR_LIMIT = 6000;
 
 // ==================================================
 // 近期上下文策略
-//
-// 目标不是简单地"只取最后 N 条"，而是：
-// 1. 给模型一段足够连续的最近对话，保持聊天语气和上下文；
-// 2. 再从更早但仍然较近的历史里挑选"可能改变后续对话"的片段；
-// 3. 长期记忆作为辅助背景，不让它盖过真正的近期聊天。
 // ==================================================
 
 const CHANGE_MARKERS = [
@@ -1194,8 +1187,6 @@ function buildRecentContextMessages(messages) {
     }
 
     // 不再只依赖"最后 48 条"。
-    // 用户睡觉后再次打开聊天时，昨晚的对话可能已经超过 48 条，
-    // 所以优先保留最近 18 小时内的真实对话。
     const cutoff = Date.now() -
         RECENT_CONTEXT_HOURS * 60 * 60 * 1000;
 
@@ -1243,14 +1234,12 @@ function getChangeScore(message, distanceFromRecent) {
 
     let score = 0;
 
-    // 明确表达决定、变化、长期偏好的话，优先级更高。
     for (const marker of CHANGE_MARKERS) {
         if (text.includes(marker)) {
             score += 3;
         }
     }
 
-    // 用户自己说得比较完整的消息，比单句闲聊更值得作为变化候选。
     if (text.length >= 40) {
         score += 1;
     }
@@ -1258,7 +1247,6 @@ function getChangeScore(message, distanceFromRecent) {
         score += 1;
     }
 
-    // 越靠近当前对话，优先级越高。
     score += Math.max(
         0,
         4 - Math.floor(distanceFromRecent / 12)
@@ -1277,7 +1265,6 @@ function buildRecentChangeMessages(messages) {
     }
 
     // 最近 48 条已经作为真正的 user/assistant 消息直接发送。
-    // 这里只从它之前的较近历史中挑选明确的"变化/决定/偏好"。
     const recentBoundary = Math.max(
         0,
         sourceMessages.length - RECENT_CONTEXT_MESSAGE_LIMIT
@@ -1318,9 +1305,6 @@ function buildRecentChangeMessages(messages) {
             continue;
         }
 
-        // 只把"用户消息 + 紧跟着的 AI 回复"作为一个历史片段。
-        // 不再把历史内容拼成"用户：... / AI：..."字符串塞进 system prompt。
-        // 这样模型可以直接依靠真正的 role 字段判断谁说了什么。
         const block = [current];
 
         if (i + 1 < source.length) {
@@ -1372,7 +1356,6 @@ function buildRecentChangeMessages(messages) {
         }
     }
 
-    // 恢复历史原本的时间顺序。
     selected.sort((a, b) => {
         const ai = source.findIndex(
             m =>
@@ -1388,7 +1371,6 @@ function buildRecentChangeMessages(messages) {
         return ai - bi;
     });
 
-    // 额外历史也使用真正的 role，但仍然限制总字符数。
     const result = [];
     let totalChars = 0;
 
@@ -1425,14 +1407,11 @@ function formatRecentChangeForLog(messages) {
         .join('\n');
 }
 
-
 function buildMemoryContext(memories) {
     if (!Array.isArray(memories) || !memories.length) {
         return '（暂无长期记忆）';
     }
 
-    // 优先使用最新创建的记忆。旧记忆仍然保存在数据库中，
-    // 但不再每次把全部历史记忆塞进 system prompt。
     const selected = memories
         .slice(-MEMORY_CONTEXT_MAX_ITEMS)
         .reverse();
@@ -2241,8 +2220,6 @@ app.post(
             const memoryText =
                 buildMemoryContext(memories);
 
-            // 不再把全部长期记忆注入 system prompt。
-            // 当前对话优先，长期记忆只作为辅助背景。
             console.log(
                 '🧠 长期记忆: ' +
                 memories.length +
@@ -2316,8 +2293,6 @@ app.post(
 
             let modelMessages = [];
 
-            // 如果这是 MCP 工具续接请求，必须保留客户端提供的
-            // tool_calls / tool 结果上下文，否则模型无法继续工具流程。
             const hasToolContext =
                 clientMessages.some(
                     m =>
@@ -2328,8 +2303,7 @@ app.post(
                         )
                 );
 
-                   if (hasToolContext) {
-                // 只保留最后 20 条工具上下文，避免请求过大导致超时
+            if (hasToolContext) {
                 const MAX_TOOL_CONTEXT = 20;
                 const recentClientMessages = clientMessages.slice(-MAX_TOOL_CONTEXT);
                 
@@ -2377,9 +2351,6 @@ app.post(
                     ' 条）'
                 );
             } else {
-                // 较早的"最近变化"也作为真正的 user/assistant role 消息发送。
-                // 以前这里把它们拼成 system prompt 中的"用户：... / AI：..."文本，
-                // 容易让模型在长上下文中把说话者身份搞混。
                 if (recentChangeMessages.length > 0) {
                     modelMessages.push({
                         role: 'system',
@@ -2412,8 +2383,6 @@ app.post(
                     )
                 );
 
-                // 当前请求的真实用户消息永远放在最后。
-                // 这样即使 Supabase 查询存在极短暂延迟，也不会漏掉当前消息。
                 modelMessages.push({
                     role: 'user',
                     content: messageForModel
@@ -2435,8 +2404,7 @@ app.post(
                 messageForModel
             );
 
-            // 只在 DEBUG_PROMPT_CONTEXT=true 时输出最终模型上下文，
-            // 用来确认"学我说话/身份串位"到底来自哪一条消息。
+            // 只在 DEBUG_PROMPT_CONTEXT=true 时输出最终模型上下文
             logPromptContextDebug(
                 requestId,
                 modelMessages
@@ -2805,10 +2773,6 @@ app.post(
                     return;
                 }
 
-                // 如果上游明确因为 Prompt 内容被拦截，
-                // 先只移除我们自动注入的"近期变化 + 长期记忆"。
-                // 当前用户消息仍然保留；如果当前消息本身被拦截，
-                // 这次重试仍会被上游拒绝，不会绕过安全策略。
                 if (
                     e?.promptBlocked &&
                     !req.aborted
@@ -3570,3 +3534,39 @@ app.use(
 
 // ==================================================
 // 启动
+// ==================================================
+
+const server =
+    app.listen(
+        PORT,
+        () => {
+            console.log(
+                '🚀 Server running on port ' +
+                PORT
+            );
+        }
+    );
+
+// ==================================================
+// Node HTTP 长连接/长请求保护
+// ==================================================
+
+server.keepAliveTimeout =
+    120000;
+
+server.headersTimeout =
+    130000;
+
+server.requestTimeout =
+    0;
+
+server.timeout =
+    0;
+
+console.log(
+    '🛡️ HTTP 长请求保护已启用: ' +
+    'keepAlive=120s, ' +
+    'headers=130s, ' +
+    'requestTimeout=0, ' +
+    'timeout=0'
+);
