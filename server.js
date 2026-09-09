@@ -1040,7 +1040,8 @@ async function supabaseUpdate(
 // ==================================================
 
 const RECENT_CONTEXT_MESSAGE_LIMIT = 36;
-const RECENT_CONTEXT_CHAR_LIMIT = 12000;
+const RECENT_CONTEXT_CHAR_LIMIT = 24000;
+const RECENT_CONTEXT_HOURS = 18;
 const RECENT_CHANGE_SCAN_LIMIT = 100;
 const RECENT_CHANGE_MAX_ITEMS = 6;
 const RECENT_CHANGE_CHAR_LIMIT = 3500;
@@ -1115,6 +1116,40 @@ function trimMessagesByCharBudget(messages, maxChars) {
     }
 
     return result;
+}
+
+function buildRecentContextMessages(messages) {
+    const sourceMessages = Array.isArray(messages)
+        ? messages.slice(0, -1)
+        : [];
+
+    if (!sourceMessages.length) {
+        return [];
+    }
+
+    // 不再只依赖“最后 36 条”。
+    // 用户睡觉后再次打开聊天时，昨晚的对话可能已经超过 36 条，
+    // 所以优先保留最近 18 小时内的真实对话。
+    const cutoff = Date.now() -
+        RECENT_CONTEXT_HOURS * 60 * 60 * 1000;
+
+    const recentByTime = sourceMessages.filter(message => {
+        const timestamp = Date.parse(message?.created_at || '');
+        return Number.isFinite(timestamp) && timestamp >= cutoff;
+    });
+
+    if (recentByTime.length > 0) {
+        return trimMessagesByCharBudget(
+            recentByTime,
+            RECENT_CONTEXT_CHAR_LIMIT
+        );
+    }
+
+    // 如果历史记录没有 created_at，退回原来的最近消息策略。
+    return trimMessagesByCharBudget(
+        sourceMessages.slice(-RECENT_CONTEXT_MESSAGE_LIMIT),
+        RECENT_CONTEXT_CHAR_LIMIT
+    );
 }
 
 function isLikelyChangeMessage(message) {
@@ -2149,11 +2184,8 @@ app.post(
             );
 
             const recentMessages =
-                trimMessagesByCharBudget(
+                buildRecentContextMessages(
                     allMessages
-                        .slice(0, -1)
-                        .slice(-RECENT_CONTEXT_MESSAGE_LIMIT),
-                    RECENT_CONTEXT_CHAR_LIMIT
                 );
 
             const recentChangeMessages =
@@ -2169,7 +2201,11 @@ app.post(
             console.log(
                 '💬 近期连续对话: ' +
                 recentMessages.length +
-                ' 条'
+                ' 条（优先最近 ' +
+                RECENT_CONTEXT_HOURS +
+                ' 小时，字符上限 ' +
+                RECENT_CONTEXT_CHAR_LIMIT +
+                '）'
             );
 
             console.log(
