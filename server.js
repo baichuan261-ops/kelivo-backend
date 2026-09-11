@@ -2293,15 +2293,28 @@ app.post(
 
             let modelMessages = [];
 
-            const hasToolContext =
-                clientMessages.some(
-                    m =>
-                        m &&
-                        (
-                            m.role === 'tool' ||
-                            Array.isArray(m.tool_calls)
-                        )
-                );
+         const lastMeaningfulMessage =
+    clientMessages
+        .slice()
+        .reverse()
+        .find(
+            m =>
+                m &&
+                m.role !== 'system'
+        );
+
+const hasToolContext =
+    !!lastMeaningfulMessage &&
+    (
+        lastMeaningfulMessage.role === 'tool' ||
+        (
+            lastMeaningfulMessage.role === 'assistant' &&
+            Array.isArray(
+                lastMeaningfulMessage.tool_calls
+            ) &&
+            lastMeaningfulMessage.tool_calls.length > 0
+        )
+    );
 
             if (hasToolContext) {
                 const MAX_TOOL_CONTEXT = 20;
