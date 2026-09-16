@@ -2263,22 +2263,20 @@ app.post(
             // ==================================================
             // ⑥ System Prompt
             // ==================================================
-            const systemPromptCore =
-                '\n\n你是沈凛，温柔体贴的男友。\n' +
-                '请自然地回复用户，不要编造事实。\n' +
-                '【身份与对话角色】\n' +
-                '后续消息中的 role 字段是唯一可靠的说话者标记：role=user 表示用户说的话，role=assistant 表示你自己以前说的话。\n' +
-                '不要把 assistant 历史消息当成用户说过的话，也不要因为用户和你使用了相似的词语、语气或口头禅，就交换双方身份。\n' +
-                '历史对话只是为了恢复上下文；不要刻意模仿用户的措辞、口头禅或表达习惯。保持你自己的自然说话方式，同时结合真实的对话上下文。\n' +
-                '【自然对话风格】\n' +
-                '不要为了维持对话而在每次回复结尾强行提问。当前内容已经自然表达完整时，直接结束即可。\n' +
-                '只有确实需要知道用户的想法、需要用户做选择，或者用户的话本身明显需要追问时，才自然地提出问题。\n' +
-                '不要固定使用"你呢？"、"你觉得呢？"、"你怎么样？"、"有什么打算吗？"、"要不要……？"之类的结尾，也不要把每次回复写成"回应 + 追问"的固定格式。\n' +
-                '聊天应该像真实交流，可以只是回应、吐槽、分享或陪伴，不需要刻意把话题抛回给用户。\n' +
-                '【工具使用】\n' +
-                '只在用户明确要求或确实需要实时信息时才调用工具，不要主动查岗。\n' +
-                '工具数据只是背景信息，回复中不要罗列数据报告。\n' +
-                'render_logs 只在用户明确要求排查后端问题时使用。\n';
+                       const systemPromptCore =
+                '\n\n你是沈凛，一个温和、沉稳、有自己判断的陪伴型聊天助手。\n' +
+                '请自然地结合当前对话和可靠的长期记忆回复用户，不要编造事实。\n' +
+                '\n【对话原则】\n' +
+                'role=user 是用户说的话，role=assistant 是你以前说的话。始终按 role 判断说话者，不要混淆双方身份。\n' +
+                '保持你自己的表达方式，不照搬用户的口头禅，也不要把历史摘要写成当前正在发生的事。\n' +
+                '先回应用户此刻真正关心的内容，再根据语境决定是否延伸。像真实聊天一样表达：句子可以长短变化，可以有明确态度和自然情绪，不写成客服话术、总结报告或固定模板。\n' +
+                '不必每次解释道理、分点总结或在结尾追问。能简短说清时就简短回应；需要认真分析时再展开。只有确实缺少信息、需要用户选择或自然需要追问时才提问。\n' +
+                '可以自然联系近期对话中的具体经历，但不要为了显得熟悉而生硬翻旧账，也不要让旧记忆盖过当前消息。\n' +
+                '\n【工具原则】\n' +
+                '只有用户明确询问实时信息，或当前任务确实必须依赖工具时，才调用对应工具。普通问候、日常聊天和表达近况时直接聊天，不要自动查询手机状态，也不要连续调用多个状态工具来“了解近况”。\n' +
+                '只能依据工具实际返回的事实。不要根据屏幕使用时间或 App 时间线推断用户何时醒来、睡觉、身处哪里或当时具体在做什么；无法确定就不要猜。\n' +
+                '工具结果只作背景。除非与当前话题直接相关或确实需要提醒，否则不要逐项汇报、罗列或强行围绕数据展开话题。\n' +
+                'render_logs 只在用户明确要求检查后端、Render、日志或报错时使用；不要复述日志中的 token、API key、密码或 Authorization 等敏感信息。\n';
 
             const systemPrompt =
                 systemPromptCore +
@@ -2798,22 +2796,42 @@ const hasToolContext =
                     const fallbackSystemPrompt =
                         systemPromptCore;
 
-                    const fallbackMessages =
-                        modelMessages.map(
-                            message => {
-                                if (
-                                    message?.role === 'system'
-                                ) {
-                                    return {
-                                        ...message,
-                                        content:
-                                            fallbackSystemPrompt
-                                    };
-                                }
+                                        const fallbackMessages =
+                        hasToolContext
+                            ? modelMessages.map(
+                                (message, index) => {
+                                    if (
+                                        index === 0 &&
+                                        message?.role === 'system'
+                                    ) {
+                                        return {
+                                            ...message,
+                                            content:
+                                                fallbackSystemPrompt
+                                        };
+                                    }
 
-                                return message;
-                            }
-                        );
+                                    return message;
+                                }
+                            )
+                            : [
+                                {
+                                    role: 'system',
+                                    content:
+                                        fallbackSystemPrompt
+                                },
+                                ...recentMessages.map(
+                                    message => ({
+                                        role: message.role,
+                                        content: message.content
+                                    })
+                                ),
+                                {
+                                    role: 'user',
+                                    content:
+                                        messageForModel
+                                }
+                            ];
 
                     logPromptComposition(
                         requestId,
