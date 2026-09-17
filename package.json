@@ -2,9 +2,9 @@
   "name": "kelivo-backend",
   "version": "1.0.0",
   "description": "Kelivo 后端",
-  "main": "memory-gateway.js",
+  "main": "memory-gateway-ui.js",
   "scripts": {
-    "start": "node memory-gateway.js"
+    "start": "node memory-gateway-ui.js"
   },
   "engines": {
     "node": "20.x"
