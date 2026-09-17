@@ -15,6 +15,7 @@ const MAX_MEMORY_TOOL_ROUNDS = 4;
 const MEMORY_TOOL_NAMES = new Set([
   'create_memory',
   'read_memory',
+  'edit_memory',
   'update_memory',
   'delete_memory'
 ]);
@@ -587,8 +588,8 @@ async function runMemoryTool(
   }
 
   if (
-    name ===
-    'update_memory'
+    name === 'edit_memory' ||
+    name === 'update_memory'
   ) {
     return updateMemory(
       sessionId,
@@ -701,10 +702,10 @@ const MEMORY_TOOLS = [
 
     function: {
       name:
-        'update_memory',
+        'edit_memory',
 
       description:
-        '修改一条已有长期记忆。必须先 read_memory 找到准确记录，再传 created_at、old_summary 和 new_summary。',
+        '修改一条已有长期记忆。必须先 read_memory 找到准确记录，再传 created_at、old_summary 和 new_summary。该工具由后端写入 Supabase，不使用 Kelivo 本地记忆。',
 
       parameters: {
         type:
