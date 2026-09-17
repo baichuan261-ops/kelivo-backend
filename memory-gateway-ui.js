@@ -57,7 +57,10 @@ replaceOnce(
       return;
     }
 
-    if (name === 'update_memory') {
+    if (
+      name === 'edit_memory' ||
+      name === 'update_memory'
+    ) {
       if (result.updated) {
         memoryNotices.add('✏️ 已更新长期记忆');
       } else if (result.unchanged) {
