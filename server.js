@@ -4,8 +4,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 console.log('🚀 服务启动中...');
-console.log("🔑 KEY长度:", TRANSFER_API_KEY?.length);
-console.log("🔑 KEY前缀:", TRANSFER_API_KEY?.slice(0,8));
 
 // ==================================================
 // 请求生命周期监控
@@ -124,17 +122,32 @@ const SUPABASE_KEY =
     process.env.SUPABASE_KEY;
 
 const TRANSFER_API_URL =
-    process.env.TRANSFER_API_URL;
+    String(process.env.TRANSFER_API_URL || '').trim();
 
 const TRANSFER_API_KEY =
-    process.env.TRANSFER_API_KEY;
+    String(process.env.TRANSFER_API_KEY || '')
+        .trim()
+        .replace(/^Bearer\s+/i, '');
 
 const CLIENT_API_KEY =
     process.env.CLIENT_API_KEY;
 
 const MODEL_NAME =
-    process.env.MODEL_NAME ||
-    'claude-3.5-sonnet';
+    String(
+        process.env.MODEL_NAME ||
+        'claude-3.5-sonnet'
+    ).trim();
+
+console.log(
+    '🔐 中转配置: url=' +
+    (TRANSFER_API_URL ? '已配置' : '缺失') +
+    ' key=' +
+    (TRANSFER_API_KEY ? '已配置' : '缺失') +
+    ' keyLength=' +
+    TRANSFER_API_KEY.length +
+    ' model=' +
+    (MODEL_NAME || '缺失')
+);
 
 // 中转 API 单次请求最长等待时间。
 const UPSTREAM_TIMEOUT_MS =
@@ -2838,8 +2851,8 @@ const hasToolContext =
                         e.upstreamTimeout = true;
                         e.timeoutMs =
                             UPSTREAM_TIMEOUT_MS;
-                    } else if (e?.promptBlocked) {
-                        // 已经在 HTTP 错误分支中记录了明确的上游拒绝原因。
+                    } else if (e?.upstreamStatus) {
+                        // 中转站已经返回 HTTP 响应，不应再误报成网络异常。
                     } else {
                         console.log(
                             '❌ 中转 fetch 异常 request=' +
@@ -3479,6 +3492,36 @@ const hasToolContext =
                         .json({
                             error:
                                 '请求内容被上游模型安全策略拦截'
+                        });
+                }
+
+                return;
+            }
+
+            if (e?.upstreamStatus) {
+                const isAuthError =
+                    e.upstreamStatus === 401 ||
+                    e.upstreamStatus === 403;
+
+                console.log(
+                    '❌ 请求失败：中转 API HTTP错误 request=' +
+                    requestId +
+                    ' status=' +
+                    e.upstreamStatus +
+                    ' type=' +
+                    (e.upstreamType || '-') +
+                    ' message=' +
+                    (e.upstreamMessage || '-')
+                );
+
+                if (!res.headersSent && !res.destroyed) {
+                    return res
+                        .status(e.upstreamStatus)
+                        .json({
+                            error: isAuthError
+                                ? '中转 API 鉴权失败，请检查 TRANSFER_API_KEY 是否属于当前 TRANSFER_API_URL'
+                                : '中转 API 请求失败',
+                            upstream_status: e.upstreamStatus
                         });
                 }
 
