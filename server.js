@@ -151,8 +151,8 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
 // 数据库偶发不可用时不能无限拖住聊天请求。
 const SUPABASE_TIMEOUT_MS =
     Math.max(
-        Number(process.env.SUPABASE_TIMEOUT_MS) || 12000,
-        3000
+        Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
+        2000
     );
 
 const MEMORY_BATCH_SIZE =
@@ -163,6 +163,12 @@ const MEMORY_BATCH_SIZE =
 
 const MEMORY_RECENT_RESERVE = 40;
 const memoryCompressionSessions = new Set();
+const memoryCompressionLastAttempt = new Map();
+const MEMORY_COMPRESSION_COOLDOWN_MS =
+    Math.max(
+        Number(process.env.MEMORY_COMPRESSION_COOLDOWN_MS) || 15 * 60 * 1000,
+        60 * 1000
+    );
 
 // ==================================================
 // Render 日志配置
@@ -976,9 +982,8 @@ async function supabaseInsert(
                 body:
                     JSON.stringify(
                         data
-                    ),
-
-                signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
+                    )
+                ,signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
             }
         );
 
@@ -1689,50 +1694,16 @@ async function compressMemories(
                 .replace(/[\s，。！？、；：,.!?;:]/g, '')
                 .toLowerCase();
 
-        const memoryBigrams = value => {
-            const normalized = normalizeMemory(value);
-            const grams = new Set();
-
-            for (let index = 0; index < normalized.length - 1; index++) {
-                grams.add(normalized.slice(index, index + 2));
-            }
-
-            return grams;
-        };
-
-        const isNearDuplicate = (left, right) => {
-            const a = memoryBigrams(left);
-            const b = memoryBigrams(right);
-
-            if (a.size === 0 || b.size === 0) {
-                return normalizeMemory(left) === normalizeMemory(right);
-            }
-
-            let overlap = 0;
-            for (const gram of a) {
-                if (b.has(gram)) {
-                    overlap++;
-                }
-            }
-
-            return overlap / Math.min(a.size, b.size) >= 0.78;
-        };
-
         const existingNormalized = new Set(
             existingRows.map(row => normalizeMemory(row.summary)).filter(Boolean)
         );
 
         const uniqueLines = lines.filter(line => {
             const normalized = normalizeMemory(line);
-            const nearExisting = existingRows.some(
-                row => isNearDuplicate(line, row.summary)
-            );
-
-            if (!normalized || existingNormalized.has(normalized) || nearExisting) {
+            if (!normalized || existingNormalized.has(normalized)) {
                 return false;
             }
             existingNormalized.add(normalized);
-            existingRows.push({ summary: line });
             return true;
         });
 
@@ -1794,7 +1765,14 @@ function scheduleMemoryCompression(sessionId, messages) {
         return;
     }
 
+    const lastAttempt = memoryCompressionLastAttempt.get(sessionId) || 0;
+    if (Date.now() - lastAttempt < MEMORY_COMPRESSION_COOLDOWN_MS) {
+        console.log('⏳ 长期记忆整理仍在冷却期，本次聊天跳过');
+        return;
+    }
+
     memoryCompressionSessions.add(sessionId);
+    memoryCompressionLastAttempt.set(sessionId, Date.now());
 
     setTimeout(async () => {
         try {
@@ -2246,32 +2224,35 @@ app.post(
                     '💾 保存新的用户消息'
                 );
 
-                Promise.allSettled([
-                    supabaseInsert(
-                        'messages',
-                        {
-                            session_id: sid,
-                            role: 'user',
-                            content: messageForHistory,
-                            visible: true
-                        }
-                    ),
-                    supabaseInsert(
-                        'timeline',
-                        {
-                            session_id: sid,
-                            role: 'user',
-                            content: messageForHistory
-                        }
-                    )
-                ]).then(results => {
-                    const failed = results.filter(result => result.status === 'rejected');
-                    if (failed.length > 0) {
-                        console.log(
-                            '⚠️ 用户消息后台保存有 ' + failed.length +
-                            ' 项失败 request=' + requestId
-                        );
+                await supabaseInsert(
+                    'messages',
+                    {
+                        session_id:
+                            sid,
+
+                        role:
+                            'user',
+
+                        content:
+                            messageForHistory,
+
+                        visible:
+                            true
                     }
+                );
+
+                void supabaseInsert(
+                    'timeline',
+                    {
+                        session_id: sid,
+                        role: 'user',
+                        content: messageForHistory
+                    }
+                ).catch(error => {
+                    console.log(
+                        '⚠️ 用户消息写入 timeline 失败，不阻塞回复 request=' +
+                        requestId + ' error=' + error.message
+                    );
                 });
             }
 
@@ -2279,8 +2260,8 @@ app.post(
             // ④ 记忆压缩
             // ==================================================
 
-            const [allResultState, memoryResultState] = await Promise.allSettled([
-                supabaseSelect(
+            const allResult =
+                await supabaseSelect(
                     'messages',
                     {
                         select:
@@ -2295,34 +2276,7 @@ app.post(
                         order:
                             'created_at.asc'
                     }
-                ),
-                supabaseSelect(
-                    'memories',
-                    {
-                        select: 'summary,created_at',
-                        session_id: 'eq.' + sid,
-                        order: 'created_at.asc'
-                    }
-                )
-            ]);
-
-            const allResult =
-                allResultState.status === 'fulfilled'
-                    ? allResultState.value
-                    : { data: [] };
-
-            const memResult =
-                memoryResultState.status === 'fulfilled'
-                    ? memoryResultState.value
-                    : { data: [] };
-
-            if (allResultState.status === 'rejected') {
-                console.log('⚠️ messages 历史读取失败，使用本次请求上下文继续回答');
-            }
-
-            if (memoryResultState.status === 'rejected') {
-                console.log('⚠️ 长期记忆读取失败，不阻塞本次回答');
-            }
+                );
 
             const allMessages =
                 allResult.data || [];
@@ -2345,6 +2299,21 @@ app.post(
             // ==================================================
             // ⑤ 加载长期记忆 + 整理近期上下文
             // ==================================================
+
+            const memResult =
+                await supabaseSelect(
+                    'memories',
+                    {
+                        select:
+                            'summary,created_at',
+
+                        session_id:
+                            'eq.' + sid,
+
+                        order:
+                            'created_at.asc'
+                    }
+                );
 
             const memories =
                 memResult.data || [];
@@ -2451,7 +2420,7 @@ const hasToolContext =
             if (hasToolContext) {
                 const MAX_TOOL_CONTEXT = 20;
                 const recentClientMessages = clientMessages.slice(-MAX_TOOL_CONTEXT);
-
+                
                 modelMessages =
                     recentClientMessages.map(
                         (m, index) => {
@@ -3345,6 +3314,10 @@ const hasToolContext =
                 .replace(/\[\s*cite\s*[:：]\s*长期记忆\s*\]/gi, '')
                 .trim();
 
+            if (!reply) {
+                reply = '我刚才没有生成有效回复，请再发一次。';
+            }
+
             if (
                 req.aborted ||
                 res.destroyed
@@ -3358,23 +3331,6 @@ const hasToolContext =
                         apiStartTime
                     ) +
                     'ms'
-                );
-
-                return;
-            }
-
-            // ==================================================
-            // ⑬ 先返回 Kelivo，再在后台保存回复。
-            // Supabase 暂时变慢时不能把已经生成的回复扣在服务端。
-            // ==================================================
-
-            if (
-                req.aborted ||
-                res.destroyed
-            ) {
-                console.log(
-                    '⚠️ 所有数据保存完成，但客户端已经断开，无法发送最终响应 request=' +
-                    requestId
                 );
 
                 return;
@@ -3423,40 +3379,35 @@ const hasToolContext =
                 'ms'
             );
 
-            Promise.allSettled([
-                supabaseInsert(
-                    'messages',
-                    {
-                        session_id: sid,
-                        role: 'assistant',
-                        content: String(reply),
-                        visible: true
-                    }
-                ),
-                supabaseInsert(
-                    'timeline',
-                    {
-                        session_id: sid,
-                        role: 'assistant',
-                        content: String(reply)
-                    }
-                )
+            // 回复已经交给前端；数据库落盘在后台并行完成。
+            // Supabase 短暂变慢时不再让 Kelivo 一直转圈。
+            void Promise.allSettled([
+                supabaseInsert('messages', {
+                    session_id: sid,
+                    role: 'assistant',
+                    content: String(reply),
+                    visible: true
+                }),
+                supabaseInsert('timeline', {
+                    session_id: sid,
+                    role: 'assistant',
+                    content: String(reply)
+                })
             ]).then(results => {
-                const failed = results.filter(result => result.status === 'rejected');
+                const failed = results.filter(
+                    result => result.status === 'rejected'
+                );
 
                 if (failed.length > 0) {
                     console.log(
-                        '⚠️ AI 回复已发给 Kelivo，但后台保存有 ' +
-                        failed.length +
-                        ' 项失败 request=' +
-                        requestId +
-                        ' errors=' +
-                        failed.map(result => result.reason?.message || String(result.reason)).join(' | ')
+                        '⚠️ AI 回复后台落盘部分失败 request=' +
+                        requestId + ' failed=' + failed.length
                     );
-                    return;
+                } else {
+                    console.log(
+                        '✅ AI 回复已后台保存 request=' + requestId
+                    );
                 }
-
-                console.log('✅ AI 回复已后台保存 request=' + requestId);
             });
 
         } catch (e) {
