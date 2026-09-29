@@ -3,7 +3,7 @@ const path = require('path');
 const Module = require('module');
 
 const gatewayPath = path.join(__dirname, 'memory-gateway.js');
-let source = fs.readFileSync(gatewayPath, 'utf8');
+let source = fs.readFileSync(gatewayPath, 'utf8').replace(/\r\n/g, '\n');
 
 function replaceOnce(needle, replacement, label) {
   const index = source.indexOf(needle);

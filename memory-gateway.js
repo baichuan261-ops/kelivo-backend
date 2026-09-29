@@ -10,14 +10,27 @@ const INNER_URL = `http://127.0.0.1:${INNER_PORT}`;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 
-const MAX_MEMORY_TOOL_ROUNDS = 4;
+const MAX_MEMORY_TOOL_ROUNDS = 2;
+const SUPABASE_TIMEOUT_MS = Math.max(
+  Number(process.env.SUPABASE_TIMEOUT_MS) || 8000,
+  2000
+);
+const INNER_CHAT_TIMEOUT_MS = Math.max(
+  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 120000,
+  10000
+);
+const GATEWAY_REQUEST_TIMEOUT_MS = Math.max(
+  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 150000,
+  30000
+);
 
 const MEMORY_TOOL_NAMES = new Set([
   'create_memory',
   'read_memory',
   'edit_memory',
   'update_memory',
-  'delete_memory'
+  'delete_memory',
+  'read_conversation'
 ]);
 
 app.use(express.json({ limit: '10mb' }));
@@ -125,19 +138,28 @@ async function sb(
       'return=representation';
   }
 
-  const response =
-    await fetch(
+  let response;
+
+  try {
+    response = await fetch(
       sbUrl(table, params),
       {
         method,
         headers,
-
         body:
           body === undefined
             ? undefined
-            : JSON.stringify(body)
+            : JSON.stringify(body),
+        signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
       }
     );
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      throw new Error(`Supabase ${method} ${table} 超时（${SUPABASE_TIMEOUT_MS}ms）`);
+    }
+
+    throw error;
+  }
 
   const text =
     await response.text();
@@ -158,6 +180,41 @@ async function sb(
   } catch (_) {
     return text;
   }
+}
+
+// ==================================================
+// READ CONVERSATION
+// 只允许读取当前 session 的可见消息，不暴露任意表或 SQL。
+// ==================================================
+
+async function readConversation(sessionId, args = {}) {
+  const limit = clampInt(args.limit, 1, 50, 20);
+  const params = {
+    select: 'role,content,created_at',
+    session_id: `eq.${sessionId}`,
+    visible: 'eq.true',
+    order: 'created_at.desc',
+    limit
+  };
+
+  const keyword = cleanText(args.keyword);
+  if (keyword) {
+    params.content = `ilike.*${keyword}*`;
+  }
+
+  const before = String(args.before || '').trim();
+  if (before && !Number.isNaN(Date.parse(before))) {
+    params.created_at = `lt.${new Date(before).toISOString()}`;
+  }
+
+  const rows = await sb('GET', 'messages', params);
+  const messages = Array.isArray(rows) ? [...rows].reverse() : [];
+
+  return {
+    ok: true,
+    count: messages.length,
+    messages
+  };
 }
 
 // ==================================================
@@ -607,6 +664,10 @@ async function runMemoryTool(
     );
   }
 
+  if (name === 'read_conversation') {
+    return readConversation(sessionId, args);
+  }
+
   return {
     ok: false,
     error:
@@ -628,7 +689,7 @@ const MEMORY_TOOLS = [
         'create_memory',
 
       description:
-        '新增一条长期记忆。只记录对未来对话确实有帮助、且用户已经明确表达的信息。不要保存密码、API Key、银行卡号等秘密，也不要重复保存已有内容。',
+        '新增一条长期记忆。只有用户明确说“记住、帮我记着、存进长期记忆”等直接要求保存时才调用；仅仅发生了某件事、表达近况或普通聊天时不要自行保存。不要保存密码、API Key、银行卡号等秘密，也不要重复保存已有内容。',
 
       parameters: {
         type:
@@ -792,6 +853,35 @@ const MEMORY_TOOLS = [
       }
     }
   }
+  ,
+  {
+    type: 'function',
+    function: {
+      name: 'read_conversation',
+      description:
+        '按需读取当前会话在 Supabase messages 表中的可见历史消息。只在当前上下文不足、用户明确提到过去说过的话、或需要核对具体旧对话时使用；普通聊天不要调用。该工具只读且不能访问其他会话。',
+      parameters: {
+        type: 'object',
+        properties: {
+          keyword: {
+            type: 'string',
+            description: '可选关键词，用于在消息正文中查找。'
+          },
+          before: {
+            type: 'string',
+            description: '可选 ISO 时间；只读取这个时间之前的消息，用于向前翻页。'
+          },
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 50,
+            description: '返回条数，默认 20，最多 50。'
+          }
+        },
+        additionalProperties: false
+      }
+    }
+  }
 ];
 
 // ==================================================
@@ -853,10 +943,13 @@ function innerHeaders(req) {
 
 async function callInner(
   req,
-  body
+  body,
+  timeoutMs = INNER_CHAT_TIMEOUT_MS
 ) {
-  const response =
-    await fetch(
+  let response;
+
+  try {
+    response = await fetch(
       `${INNER_URL}/api/chat`,
       {
         method:
@@ -865,10 +958,24 @@ async function callInner(
         headers:
           innerHeaders(req),
 
-        body:
-          JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(
+          Math.max(1000, Math.min(INNER_CHAT_TIMEOUT_MS, timeoutMs))
+        )
       }
     );
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      return {
+        status: 504,
+        ok: false,
+        text: JSON.stringify({ error: '聊天处理超时，请稍后重试' }),
+        json: { error: '聊天处理超时，请稍后重试' }
+      };
+    }
+
+    throw error;
+  }
 
   const text =
     await response.text();
@@ -1037,6 +1144,7 @@ async function handleChat(
 
   const original =
     req.body || {};
+  const requestDeadline = Date.now() + GATEWAY_REQUEST_TIMEOUT_MS;
 
   const sessionId =
     original.sessionId ??
@@ -1069,7 +1177,8 @@ async function handleChat(
     const inner =
       await callInner(
         req,
-        body
+        body,
+        requestDeadline - Date.now()
       );
 
     if (
@@ -1132,18 +1241,6 @@ async function handleChat(
         .json(
           inner.json
         );
-    }
-
-    if (
-      round ===
-      MAX_MEMORY_TOOL_ROUNDS
-    ) {
-      return res
-        .status(500)
-        .json({
-          error:
-            '记忆工具连续调用次数过多，已停止以避免死循环'
-        });
     }
 
     console.log(
@@ -1230,12 +1327,24 @@ async function handleChat(
 
     // 再把工具结果送回原来的 server.js，
     // 模型就能看到数据库执行结果并继续回答。
+    const nextTools =
+      round + 1 >= MAX_MEMORY_TOOL_ROUNDS
+        ? tools.filter(
+            tool => !MEMORY_TOOL_NAMES.has(tool?.function?.name)
+          )
+        : tools;
+
     body = {
       ...original,
 
       messages,
 
-      tools,
+      tools: nextTools,
+
+      tool_choice:
+        nextTools.length === 0
+          ? 'none'
+          : original.tool_choice,
 
       stream:
         false

@@ -148,6 +148,22 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
         10000
     );
 
+// 数据库偶发不可用时不能无限拖住聊天请求。
+const SUPABASE_TIMEOUT_MS =
+    Math.max(
+        Number(process.env.SUPABASE_TIMEOUT_MS) || 12000,
+        3000
+    );
+
+const MEMORY_BATCH_SIZE =
+    Math.max(
+        Number(process.env.MEMORY_BATCH_SIZE) || 200,
+        50
+    );
+
+const MEMORY_RECENT_RESERVE = 40;
+const memoryCompressionSessions = new Set();
+
 // ==================================================
 // Render 日志配置
 // ==================================================
@@ -960,7 +976,9 @@ async function supabaseInsert(
                 body:
                     JSON.stringify(
                         data
-                    )
+                    ),
+
+                signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
             }
         );
 
@@ -1014,7 +1032,9 @@ async function supabaseSelect(
 
                     'Content-Type':
                         'application/json'
-                }
+                },
+
+                signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
             }
         );
 
@@ -1082,7 +1102,9 @@ async function supabaseUpdate(
                 body:
                     JSON.stringify(
                         data
-                    )
+                    ),
+
+                signal: AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
             }
         );
 
@@ -1454,17 +1476,11 @@ async function compressMemories(
 ) {
     try {
         console.log(
-            '🧠 消息超过 200 条，开始压缩长期记忆'
+            '🧠 开始整理一批 ' + messages.length + ' 条历史消息'
         );
 
         const oldMessages =
-            messages.slice(
-                0,
-                Math.max(
-                    0,
-                    messages.length - 40
-                )
-            );
+            messages.slice(0, MEMORY_BATCH_SIZE);
 
         if (
             !oldMessages.length
@@ -1488,6 +1504,27 @@ async function compressMemories(
                 )
                 .join('\n');
 
+        let existingMemoryText = '（暂无）';
+
+        try {
+            const existingResult = await supabaseSelect(
+                'memories',
+                {
+                    select: 'summary',
+                    session_id: 'eq.' + sessionId,
+                    order: 'created_at.asc',
+                    limit: '100'
+                }
+            );
+
+            existingMemoryText = (existingResult.data || [])
+                .map(item => sanitizeContent(item.summary).trim())
+                .filter(Boolean)
+                .join('\n') || '（暂无）';
+        } catch (error) {
+            console.log('⚠️ 整理记忆时读取已有记忆失败，继续处理:', error.message);
+        }
+
         const prompt =
             '\n\n请从下面的历史对话中提取值得长期记忆的信息。\n\n' +
             '只保留：\n\n' +
@@ -1499,8 +1536,11 @@ async function compressMemories(
             '临时聊天内容\n' +
             '一次性的情绪\n' +
             '无意义闲聊\n' +
-            '推测出来的信息\n\n' +
-            '请输出简洁的中文记忆，每条一行。\n\n' +
+            '推测出来的信息\n' +
+            '已经结束且对以后没有帮助的一次性待办\n\n' +
+            '下面是已经存在的长期记忆。不要重复输出相同或近似的信息；如果历史对话只是更新了旧状态，只输出更新后的完整事实，并在开头写“更新：”。\n' +
+            existingMemoryText + '\n\n' +
+            '请输出简洁的中文记忆，每条一行；没有新增长期信息时只输出“无”。\n\n' +
             '历史对话：\n' +
             oldText +
             '\n';
@@ -1627,11 +1667,78 @@ async function compressMemories(
                             )
                             .trim()
                 )
-                .filter(Boolean);
+                .filter(line => line && line !== '无');
+
+        let existingRows = [];
+        try {
+            const result = await supabaseSelect(
+                'memories',
+                {
+                    select: 'summary',
+                    session_id: 'eq.' + sessionId,
+                    order: 'created_at.asc',
+                    limit: '200'
+                }
+            );
+            existingRows = result.data || [];
+        } catch (_) {}
+
+        const normalizeMemory = value =>
+            sanitizeContent(value)
+                .replace(/^更新[：:]\s*/, '')
+                .replace(/[\s，。！？、；：,.!?;:]/g, '')
+                .toLowerCase();
+
+        const memoryBigrams = value => {
+            const normalized = normalizeMemory(value);
+            const grams = new Set();
+
+            for (let index = 0; index < normalized.length - 1; index++) {
+                grams.add(normalized.slice(index, index + 2));
+            }
+
+            return grams;
+        };
+
+        const isNearDuplicate = (left, right) => {
+            const a = memoryBigrams(left);
+            const b = memoryBigrams(right);
+
+            if (a.size === 0 || b.size === 0) {
+                return normalizeMemory(left) === normalizeMemory(right);
+            }
+
+            let overlap = 0;
+            for (const gram of a) {
+                if (b.has(gram)) {
+                    overlap++;
+                }
+            }
+
+            return overlap / Math.min(a.size, b.size) >= 0.78;
+        };
+
+        const existingNormalized = new Set(
+            existingRows.map(row => normalizeMemory(row.summary)).filter(Boolean)
+        );
+
+        const uniqueLines = lines.filter(line => {
+            const normalized = normalizeMemory(line);
+            const nearExisting = existingRows.some(
+                row => isNearDuplicate(line, row.summary)
+            );
+
+            if (!normalized || existingNormalized.has(normalized) || nearExisting) {
+                return false;
+            }
+            existingNormalized.add(normalized);
+            existingRows.push({ summary: line });
+            return true;
+        });
 
         for (
             const line
-            of lines
+            of uniqueLines
         ) {
             await supabaseInsert(
                 'memories',
@@ -1647,7 +1754,7 @@ async function compressMemories(
 
         console.log(
             '🧠 已保存 ' +
-            lines.length +
+            uniqueLines.length +
             ' 条长期记忆'
         );
 
@@ -1680,6 +1787,22 @@ async function compressMemories(
             e.message
         );
     }
+}
+
+function scheduleMemoryCompression(sessionId, messages) {
+    if (memoryCompressionSessions.has(sessionId)) {
+        return;
+    }
+
+    memoryCompressionSessions.add(sessionId);
+
+    setTimeout(async () => {
+        try {
+            await compressMemories(sessionId, messages);
+        } finally {
+            memoryCompressionSessions.delete(sessionId);
+        }
+    }, 15000).unref?.();
 }
 
 // ==================================================
@@ -2123,44 +2246,41 @@ app.post(
                     '💾 保存新的用户消息'
                 );
 
-                await supabaseInsert(
-                    'messages',
-                    {
-                        session_id:
-                            sid,
-
-                        role:
-                            'user',
-
-                        content:
-                            messageForHistory,
-
-                        visible:
-                            true
+                Promise.allSettled([
+                    supabaseInsert(
+                        'messages',
+                        {
+                            session_id: sid,
+                            role: 'user',
+                            content: messageForHistory,
+                            visible: true
+                        }
+                    ),
+                    supabaseInsert(
+                        'timeline',
+                        {
+                            session_id: sid,
+                            role: 'user',
+                            content: messageForHistory
+                        }
+                    )
+                ]).then(results => {
+                    const failed = results.filter(result => result.status === 'rejected');
+                    if (failed.length > 0) {
+                        console.log(
+                            '⚠️ 用户消息后台保存有 ' + failed.length +
+                            ' 项失败 request=' + requestId
+                        );
                     }
-                );
-
-                await supabaseInsert(
-                    'timeline',
-                    {
-                        session_id:
-                            sid,
-
-                        role:
-                            'user',
-
-                        content:
-                            messageForHistory
-                    }
-                );
+                });
             }
 
             // ==================================================
             // ④ 记忆压缩
             // ==================================================
 
-            const allResult =
-                await supabaseSelect(
+            const [allResultState, memoryResultState] = await Promise.allSettled([
+                supabaseSelect(
                     'messages',
                     {
                         select:
@@ -2175,7 +2295,34 @@ app.post(
                         order:
                             'created_at.asc'
                     }
-                );
+                ),
+                supabaseSelect(
+                    'memories',
+                    {
+                        select: 'summary,created_at',
+                        session_id: 'eq.' + sid,
+                        order: 'created_at.asc'
+                    }
+                )
+            ]);
+
+            const allResult =
+                allResultState.status === 'fulfilled'
+                    ? allResultState.value
+                    : { data: [] };
+
+            const memResult =
+                memoryResultState.status === 'fulfilled'
+                    ? memoryResultState.value
+                    : { data: [] };
+
+            if (allResultState.status === 'rejected') {
+                console.log('⚠️ messages 历史读取失败，使用本次请求上下文继续回答');
+            }
+
+            if (memoryResultState.status === 'rejected') {
+                console.log('⚠️ 长期记忆读取失败，不阻塞本次回答');
+            }
 
             const allMessages =
                 allResult.data || [];
@@ -2186,10 +2333,10 @@ app.post(
             );
 
             if (
-                allMessages.length >
-                200
+                allMessages.length >=
+                MEMORY_BATCH_SIZE + MEMORY_RECENT_RESERVE
             ) {
-                await compressMemories(
+                scheduleMemoryCompression(
                     sid,
                     allMessages
                 );
@@ -2198,21 +2345,6 @@ app.post(
             // ==================================================
             // ⑤ 加载长期记忆 + 整理近期上下文
             // ==================================================
-
-            const memResult =
-                await supabaseSelect(
-                    'memories',
-                    {
-                        select:
-                            'summary,created_at',
-
-                        session_id:
-                            'eq.' + sid,
-
-                        order:
-                            'created_at.asc'
-                    }
-                );
 
             const memories =
                 memResult.data || [];
@@ -2276,6 +2408,8 @@ app.post(
                 '只有用户明确询问实时信息，或当前任务确实必须依赖工具时，才调用对应工具。普通问候、日常聊天和表达近况时直接聊天，不要自动查询手机状态，也不要连续调用多个状态工具来“了解近况”。\n' +
                 '只能依据工具实际返回的事实。不要根据屏幕使用时间或 App 时间线推断用户何时醒来、睡觉、身处哪里或当时具体在做什么；无法确定就不要猜。\n' +
                 '工具结果只作背景。除非与当前话题直接相关或确实需要提醒，否则不要逐项汇报、罗列或强行围绕数据展开话题。\n' +
+                '当当前上下文不足而用户提到过去说过的话时，可以使用 read_conversation 查当前会话的历史消息；普通聊天不要查询。\n' +
+                '回复中不要输出【cite:长期记忆】、[cite:长期记忆] 或任何内部来源标记。\n' +
                 'render_logs 只在用户明确要求检查后端、Render、日志或报错时使用；不要复述日志中的 token、API key、密码或 Authorization 等敏感信息。\n';
 
             const systemPrompt =
@@ -2317,7 +2451,7 @@ const hasToolContext =
             if (hasToolContext) {
                 const MAX_TOOL_CONTEXT = 20;
                 const recentClientMessages = clientMessages.slice(-MAX_TOOL_CONTEXT);
-                
+
                 modelMessages =
                     recentClientMessages.map(
                         (m, index) => {
@@ -3185,7 +3319,7 @@ const hasToolContext =
             // ⑫ 普通最终回答
             // ==================================================
 
-            const reply =
+            let reply =
                 assistantMessage
                     ?.content ||
 
@@ -3206,6 +3340,11 @@ const hasToolContext =
                 requestId
             );
 
+            reply = String(reply || '')
+                .replace(/【\s*cite\s*[:：]\s*长期记忆\s*】/gi, '')
+                .replace(/\[\s*cite\s*[:：]\s*长期记忆\s*\]/gi, '')
+                .trim();
+
             if (
                 req.aborted ||
                 res.destroyed
@@ -3225,86 +3364,8 @@ const hasToolContext =
             }
 
             // ==================================================
-            // ⑬ 保存 AI 回复
-            // ==================================================
-
-            console.log(
-                '💾 开始保存 AI 回复到 messages request=' +
-                requestId
-            );
-
-            await supabaseInsert(
-                'messages',
-                {
-                    session_id:
-                        sid,
-
-                    role:
-                        'assistant',
-
-                    content:
-                        String(reply),
-
-                    visible:
-                        true
-                }
-            );
-
-            console.log(
-                '✅ AI 回复已保存到 messages request=' +
-                requestId +
-                ' elapsed=' +
-                (
-                    Date.now() -
-                    apiStartTime
-                ) +
-                'ms'
-            );
-
-            if (
-                req.aborted ||
-                res.destroyed
-            ) {
-                console.log(
-                    '⚠️ 保存 messages 后发现客户端已经断开 request=' +
-                    requestId
-                );
-
-                return;
-            }
-
-            console.log(
-                '💾 开始保存 AI 回复到 timeline request=' +
-                requestId
-            );
-
-            await supabaseInsert(
-                'timeline',
-                {
-                    session_id:
-                        sid,
-
-                    role:
-                        'assistant',
-
-                    content:
-                        String(reply)
-                }
-            );
-
-            console.log(
-                '✅ AI 回复已保存到 timeline request=' +
-                requestId +
-                ' elapsed=' +
-                (
-                    Date.now() -
-                    apiStartTime
-                ) +
-                'ms'
-            );
-
-            // ==================================================
-            // ⑭ 返回 Kelivo
+            // ⑬ 先返回 Kelivo，再在后台保存回复。
+            // Supabase 暂时变慢时不能把已经生成的回复扣在服务端。
             // ==================================================
 
             if (
@@ -3361,6 +3422,42 @@ const hasToolContext =
                 ) +
                 'ms'
             );
+
+            Promise.allSettled([
+                supabaseInsert(
+                    'messages',
+                    {
+                        session_id: sid,
+                        role: 'assistant',
+                        content: String(reply),
+                        visible: true
+                    }
+                ),
+                supabaseInsert(
+                    'timeline',
+                    {
+                        session_id: sid,
+                        role: 'assistant',
+                        content: String(reply)
+                    }
+                )
+            ]).then(results => {
+                const failed = results.filter(result => result.status === 'rejected');
+
+                if (failed.length > 0) {
+                    console.log(
+                        '⚠️ AI 回复已发给 Kelivo，但后台保存有 ' +
+                        failed.length +
+                        ' 项失败 request=' +
+                        requestId +
+                        ' errors=' +
+                        failed.map(result => result.reason?.message || String(result.reason)).join(' | ')
+                    );
+                    return;
+                }
+
+                console.log('✅ AI 回复已后台保存 request=' + requestId);
+            });
 
         } catch (e) {
 
