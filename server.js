@@ -4,6 +4,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 console.log('🚀 服务启动中...');
+console.log("🔑 KEY长度:", TRANSFER_API_KEY?.length);
+console.log("🔑 KEY前缀:", TRANSFER_API_KEY?.slice(0,8));
 
 // ==================================================
 // 请求生命周期监控
