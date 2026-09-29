@@ -184,7 +184,8 @@ async function sb(
 
 // ==================================================
 // READ CONVERSATION
-// 只允许读取当前 session 的可见消息，不暴露任意表或 SQL。
+// 只允许读取当前 session 的消息，不暴露任意表或 SQL。
+// 包括被长期记忆整理标为 visible=false 的归档行，否则工具仍找不到旧对话。
 // ==================================================
 
 async function readConversation(sessionId, args = {}) {
@@ -192,7 +193,6 @@ async function readConversation(sessionId, args = {}) {
   const params = {
     select: 'role,content,created_at',
     session_id: `eq.${sessionId}`,
-    visible: 'eq.true',
     order: 'created_at.desc',
     limit
   };
@@ -208,7 +208,26 @@ async function readConversation(sessionId, args = {}) {
   }
 
   const rows = await sb('GET', 'messages', params);
-  const messages = Array.isArray(rows) ? [...rows].reverse() : [];
+  let totalChars = 0;
+  const messages = [];
+
+  for (const row of (Array.isArray(rows) ? [...rows].reverse() : [])) {
+    const content = cleanText(row?.content).slice(0, 2000);
+    if (!content) {
+      continue;
+    }
+
+    if (messages.length > 0 && totalChars + content.length > 16000) {
+      break;
+    }
+
+    messages.push({
+      role: row.role,
+      content,
+      created_at: row.created_at
+    });
+    totalChars += content.length;
+  }
 
   return {
     ok: true,
@@ -689,7 +708,7 @@ const MEMORY_TOOLS = [
         'create_memory',
 
       description:
-        '新增一条长期记忆。只有用户明确说“记住、帮我记着、存进长期记忆”等直接要求保存时才调用；仅仅发生了某件事、表达近况或普通聊天时不要自行保存。不要保存密码、API Key、银行卡号等秘密，也不要重复保存已有内容。',
+        '新增一条长期记忆。只记录对未来对话确实有帮助、且用户已经明确表达的信息。不要保存密码、API Key、银行卡号等秘密，也不要重复保存已有内容。',
 
       parameters: {
         type:
@@ -859,7 +878,7 @@ const MEMORY_TOOLS = [
     function: {
       name: 'read_conversation',
       description:
-        '按需读取当前会话在 Supabase messages 表中的可见历史消息。只在当前上下文不足、用户明确提到过去说过的话、或需要核对具体旧对话时使用；普通聊天不要调用。该工具只读且不能访问其他会话。',
+        '按需读取当前会话在 Supabase messages 表中的历史消息（包括已归档的旧消息）。只在当前上下文不足、用户明确提到过去说过的话、或需要核对具体旧对话时使用；普通聊天不要调用。该工具只读且不能访问其他会话。',
       parameters: {
         type: 'object',
         properties: {
