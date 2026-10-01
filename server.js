@@ -163,6 +163,128 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
         10000
     );
 
+const MAX_TOOL_CONTEXT_MESSAGES = 20;
+const EMPTY_UPSTREAM_RETRY_LIMIT = 1;
+
+function getToolCallNameMap(messages) {
+    const names = new Map();
+
+    for (const message of messages || []) {
+        if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) {
+            continue;
+        }
+
+        for (const call of message.tool_calls) {
+            const id = String(call?.id || '').trim();
+            const name = String(call?.function?.name || '').trim();
+            if (id && name) {
+                names.set(id, name);
+            }
+        }
+    }
+
+    return names;
+}
+
+function buildToolContinuationContext(messages, maxMessages = MAX_TOOL_CONTEXT_MESSAGES) {
+    const source = Array.isArray(messages) ? messages : [];
+    const toolNames = getToolCallNameMap(source);
+    let start = Math.max(0, source.length - maxMessages);
+    let movedStart = true;
+
+    // 截取点若落在工具轮次中间，向前包含对应的 assistant tool_calls。
+    while (movedStart && start > 0) {
+        movedStart = false;
+
+        for (let index = start; index < source.length; index++) {
+            const message = source[index];
+            if (message?.role !== 'tool') {
+                continue;
+            }
+
+            const callId = String(message.tool_call_id || '').trim();
+            if (!callId) {
+                continue;
+            }
+
+            let callIndex = -1;
+            for (let previous = index - 1; previous >= 0; previous--) {
+                const calls = source[previous]?.tool_calls;
+                if (
+                    source[previous]?.role === 'assistant' &&
+                    Array.isArray(calls) &&
+                    calls.some(call => String(call?.id || '') === callId)
+                ) {
+                    callIndex = previous;
+                    break;
+                }
+            }
+
+            if (callIndex >= 0 && callIndex < start) {
+                start = callIndex;
+                movedStart = true;
+                break;
+            }
+        }
+    }
+
+    const selected = source.slice(start);
+    const selectedCallIds = new Set();
+
+    for (const message of selected) {
+        if (message?.role !== 'assistant' || !Array.isArray(message.tool_calls)) {
+            continue;
+        }
+
+        for (const call of message.tool_calls) {
+            const id = String(call?.id || '').trim();
+            if (id) {
+                selectedCallIds.add(id);
+            }
+        }
+    }
+
+    let droppedOrphans = 0;
+    const repaired = [];
+
+    for (const message of selected) {
+        if (!message || typeof message !== 'object') {
+            continue;
+        }
+
+        if (message.role !== 'tool') {
+            repaired.push(message);
+            continue;
+        }
+
+        const callId = String(message.tool_call_id || '').trim();
+        const name = String(message.name || toolNames.get(callId) || '').trim();
+
+        // 孤立结果不能靠虚构名字修复；丢弃比发出无效 Gemini 请求更安全。
+        if (!callId || !name || !selectedCallIds.has(callId)) {
+            droppedOrphans++;
+            continue;
+        }
+
+        repaired.push({ ...message, name });
+    }
+
+    return { messages: repaired, start, droppedOrphans };
+}
+
+function hasAssistantOutput(data) {
+    const message = data?.choices?.[0]?.message;
+    const content = typeof message?.content === 'string'
+        ? message.content.trim()
+        : message?.content;
+
+    return Boolean(
+        content ||
+        (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) ||
+        data?.reply || data?.result || data?.content || data?.output || data?.response
+    );
+}
+
 // 数据库偶发不可用时不能无限拖住聊天请求。
 const SUPABASE_TIMEOUT_MS =
     Math.max(
@@ -2433,8 +2555,11 @@ const hasToolContext =
     );
 
             if (hasToolContext) {
-                const MAX_TOOL_CONTEXT = 20;
-                const recentClientMessages = clientMessages.slice(-MAX_TOOL_CONTEXT);
+                const toolContext = buildToolContinuationContext(
+                    clientMessages,
+                    MAX_TOOL_CONTEXT_MESSAGES
+                );
+                const recentClientMessages = toolContext.messages;
                 
                 modelMessages =
                     recentClientMessages.map(
@@ -2474,10 +2599,14 @@ const hasToolContext =
 
                 console.log(
                     '🛠️ 检测到工具续接，保留最近 ' +
-                    MAX_TOOL_CONTEXT +
+                    recentClientMessages.length +
                     ' 条工具上下文（原始 ' +
                     clientMessages.length +
-                    ' 条）'
+                    ' 条，起点 ' + toolContext.start +
+                    (toolContext.droppedOrphans > 0
+                        ? '，丢弃孤立工具结果 ' + toolContext.droppedOrphans + ' 条'
+                        : '') +
+                    '）'
                 );
             } else {
                 if (recentChangeMessages.length > 0) {
@@ -2877,6 +3006,33 @@ const hasToolContext =
                 }
             }
 
+            async function callUpstreamWithEmptyRetry(messages) {
+                let result;
+
+                for (let attempt = 0; attempt <= EMPTY_UPSTREAM_RETRY_LIMIT; attempt++) {
+                    result = await callUpstream(messages);
+
+                    if (hasAssistantOutput(result)) {
+                        return result;
+                    }
+
+                    const choice = result?.choices?.[0];
+                    console.log(
+                        '⚠️ 中转 API 返回空结果 request=' + requestId +
+                        ' attempt=' + (attempt + 1) +
+                        ' finish_reason=' + String(choice?.finish_reason || 'unknown') +
+                        ' completion_tokens=' +
+                        String(result?.usage?.completion_tokens ?? 'unknown')
+                    );
+
+                    if (attempt < EMPTY_UPSTREAM_RETRY_LIMIT) {
+                        console.log('🔄 空结果自动重试 request=' + requestId);
+                    }
+                }
+
+                return result;
+            }
+
             console.log(
                 '🚀 调用中转 API...'
             );
@@ -2885,7 +3041,7 @@ const hasToolContext =
 
             try {
                 data =
-                    await callUpstream(
+                    await callUpstreamWithEmptyRetry(
                         modelMessages
                     );
 
@@ -2963,7 +3119,7 @@ const hasToolContext =
 
                     try {
                         data =
-                            await callUpstream(
+                            await callUpstreamWithEmptyRetry(
                                 fallbackMessages
                             );
 
@@ -3168,7 +3324,7 @@ const hasToolContext =
 
                 try {
                     data =
-                        await callUpstream(
+                        await callUpstreamWithEmptyRetry(
                             modelMessages
                         );
 
@@ -3317,7 +3473,7 @@ const hasToolContext =
 
                 data.response ||
 
-                '机走神了~';
+                '';
 
             console.log(
                 '🤖 回复内容已生成 request=' +
