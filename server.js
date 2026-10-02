@@ -166,6 +166,22 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
 const MAX_TOOL_CONTEXT_MESSAGES = 20;
 const EMPTY_UPSTREAM_RETRY_LIMIT = 1;
 
+// Gemini 的输出额度可能同时覆盖思考与正文，2048 容易耗尽。
+function resolveChatMaxTokens(model, requested) {
+    const parsed = Number(requested);
+    const valid = Number.isFinite(parsed) && parsed > 0;
+    const requestedTokens = valid ? Math.floor(parsed) : 2048;
+    if (!/gemini/i.test(String(model || ''))) {
+        return requestedTokens;
+    }
+    const configured = Number(process.env.GEMINI_MIN_OUTPUT_TOKENS);
+    const minimum = Number.isFinite(configured) && configured > 0
+        ? Math.floor(configured)
+        : 8192;
+    return Math.max(requestedTokens, minimum);
+}
+
+
 function getToolCallNameMap(messages) {
     const names = new Map();
 
@@ -2733,8 +2749,10 @@ const hasToolContext =
                         req.body.top_p,
 
                     max_tokens:
-                        req.body.max_tokens ??
-                        2048
+                        resolveChatMaxTokens(
+                            req.body.model || MODEL_NAME,
+                            req.body.max_tokens
+                        )
                 };
 
                 if (
@@ -2752,6 +2770,13 @@ const hasToolContext =
                     upstreamBody.thinking =
                         req.body.thinking;
                 }
+
+                console.log(
+                    '🔢 输出额度 request=' + requestId +
+                    ' model=' + upstreamBody.model +
+                    ' requested=' + String(req.body.max_tokens ?? 'default') +
+                    ' effective=' + upstreamBody.max_tokens
+                );
 
                 const serializedBody =
                     JSON.stringify(upstreamBody);
@@ -2947,6 +2972,18 @@ const hasToolContext =
                             upstreamStart
                         ) +
                         'ms'
+                    );
+
+                    const choice = result?.choices?.[0];
+                    const message = choice?.message;
+                    console.log(
+                        '🏁 中转生成结束 request=' + requestId +
+                        ' finish_reason=' + String(choice?.finish_reason || 'unknown') +
+                        ' max_tokens=' + upstreamBody.max_tokens +
+                        ' completion_tokens=' + String(result?.usage?.completion_tokens ?? 'unknown') +
+                        ' reasoning_tokens=' + String(result?.usage?.completion_tokens_details?.reasoning_tokens ?? 'unknown') +
+                        ' contentChars=' + sanitizeContent(message?.content).length +
+                        ' reasoningChars=' + sanitizeContent(message?.reasoning_content).length
                     );
 
                     return result;
@@ -3516,10 +3553,12 @@ const hasToolContext =
 
                             content:
                                 String(reply)
-                        }
+                        },
+                        finish_reason:
+                            data.choices?.[0]?.finish_reason || 'stop'
                     }
                 ],
-
+                usage: data.usage,
                 reply:
                     String(reply)
             };
