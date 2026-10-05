@@ -1960,6 +1960,46 @@ app.get(
 // 主聊天接口
 // ==================================================
 
+// Kelivo 客户端用这个游标接口拉取服务器主动生成的消息。
+// source 字段由 supabase/proactive_messages.sql 添加；普通聊天消息保持 null。
+app.get(
+    '/api/proactive/messages',
+    async (req, res) => {
+        const authHeader = req.headers.authorization || '';
+        const bearer = authHeader.startsWith('Bearer ')
+            ? authHeader.substring(7).trim()
+            : '';
+        const clientKey = bearer || req.headers['x-api-key'] || '';
+
+        if (!CLIENT_API_KEY || clientKey !== CLIENT_API_KEY) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
+        try {
+            const sid = String(req.query.session_id || '1');
+            const afterId = Math.max(0, Number(req.query.after_id || 0));
+            const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+            const params = {
+                select: 'id,session_id,role,content,created_at',
+                session_id: 'eq.' + sid,
+                source: 'eq.proactive',
+                order: 'id.asc',
+                limit: String(limit)
+            };
+
+            if (afterId > 0) {
+                params.id = 'gt.' + Math.floor(afterId);
+            }
+
+            const result = await supabaseSelect('messages', params);
+            return res.json({ messages: result.data || [] });
+        } catch (error) {
+            console.log('⚠️ 主动消息拉取失败:', error.message);
+            return res.status(500).json({ error: '主动消息拉取失败' });
+        }
+    }
+);
+
 app.post(
     '/api/chat',
     async (req, res) => {

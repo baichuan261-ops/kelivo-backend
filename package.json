@@ -4,7 +4,9 @@
   "description": "Kelivo 后端",
   "main": "memory-gateway-ui.js",
   "scripts": {
-    "start": "node memory-gateway-ui.js"
+    "start": "node memory-gateway-ui.js",
+    "heartbeat": "node proactive-heartbeat.js",
+    "test": "node --test"
   },
   "engines": {
     "node": "20.x"
