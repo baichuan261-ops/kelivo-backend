@@ -118,6 +118,10 @@ async function main() {
     timeZone: TIME_ZONE, dateStyle: 'full', timeStyle: 'long'
   }).format(new Date());
   const messages = buildHeartbeatMessages({ rows, memories, nowText, characterName: CHARACTER_NAME });
+  const configuredMaxTokens = Math.max(256, Number(env.HEARTBEAT_MAX_TOKENS || 1200));
+  const maxTokens = /gemini/i.test(MODEL_NAME)
+    ? Math.max(8192, configuredMaxTokens)
+    : configuredMaxTokens;
 
   const response = await fetch(TRANSFER_API_URL, {
     method: 'POST',
@@ -130,14 +134,23 @@ async function main() {
       messages,
       stream: false,
       temperature: 0.8,
-      max_tokens: Number(env.HEARTBEAT_MAX_TOKENS || 1200),
+      max_tokens: maxTokens,
       // 不强制 response_format，兼容不支持该字段的 OpenAI 中转。
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS)
   });
   if (!response.ok) throw new Error(`模型请求失败 (${response.status}): ${await response.text()}`);
   const data = await response.json();
-  const decision = parseDecision(data?.choices?.[0]?.message?.content);
+  const choice = data?.choices?.[0];
+  const modelOutput = choice?.message?.content ?? data?.reply ?? data?.output ?? data?.result;
+  const decision = parseDecision(modelOutput);
+
+  console.log(JSON.stringify({
+    event: 'model_completed',
+    finishReason: choice?.finish_reason || null,
+    outputChars: typeof modelOutput === 'string' ? modelOutput.length : null,
+    maxTokens
+  }));
 
   if (!decision.send) {
     console.log(JSON.stringify({ ok: true, action: 'skip', reason: decision.reason }));
