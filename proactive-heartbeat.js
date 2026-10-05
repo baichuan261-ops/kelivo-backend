@@ -48,10 +48,17 @@ async function push(title, message) {
   if (provider === 'ntfy') {
     required('NTFY_TOPIC', env.NTFY_TOPIC);
     const base = String(env.NTFY_BASE_URL || 'https://ntfy.sh').replace(/\/$/, '');
-    const headers = { Title: title, 'Content-Type': 'text/plain; charset=utf-8' };
+    const headers = { 'Content-Type': 'application/json; charset=utf-8' };
     if (env.NTFY_TOKEN) headers.Authorization = `Bearer ${env.NTFY_TOKEN}`;
-    const response = await fetch(`${base}/${encodeURIComponent(env.NTFY_TOPIC)}`, {
-      method: 'POST', headers, body: message, signal: AbortSignal.timeout(20000)
+    const response = await fetch(base, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        topic: env.NTFY_TOPIC,
+        title,
+        message
+      }),
+      signal: AbortSignal.timeout(20000)
     });
     if (!response.ok) throw new Error(`ntfy 推送失败 (${response.status}): ${await response.text()}`);
     return { provider, delivered: true };
