@@ -138,13 +138,22 @@ async function main() {
   }
 
   // 先落库，再推送。客户端即使比推送更早拉取，也能拿到完整消息。
-  const inserted = await supabase('POST', 'messages', {}, {
+  const messageRow = {
     session_id: SESSION_ID,
     role: 'assistant',
     content: decision.message,
     visible: true,
     source: 'proactive'
-  });
+  };
+  let inserted;
+  try {
+    inserted = await supabase('POST', 'messages', {}, messageRow);
+  } catch (error) {
+    // 允许 Cron 在数据库迁移前先投入运行；迁移只影响客户端主动消息同步。
+    if (!/source/i.test(error.message)) throw error;
+    const { source: _source, ...legacyRow } = messageRow;
+    inserted = await supabase('POST', 'messages', {}, legacyRow);
+  }
   await supabase('POST', 'timeline', {}, {
     session_id: SESSION_ID,
     role: 'assistant',
