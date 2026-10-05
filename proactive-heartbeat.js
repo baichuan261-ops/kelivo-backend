@@ -2,7 +2,9 @@
 
 const {
   buildHeartbeatMessages,
+  hoursSince,
   parseDecision,
+  pushGapHoursForLocalHour,
   shouldSkipForCooldown
 } = require('./proactive-core');
 
@@ -154,6 +156,32 @@ async function main() {
 
   if (!decision.send) {
     console.log(JSON.stringify({ ok: true, action: 'skip', reason: decision.reason }));
+    return;
+  }
+
+  const localHour = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: TIME_ZONE,
+    hour: 'numeric',
+    hourCycle: 'h23'
+  }).format(new Date()));
+  const pushGapHours = pushGapHoursForLocalHour(localHour, {
+    nightStart: env.HEARTBEAT_NIGHT_START_HOUR || 2,
+    nightEnd: env.HEARTBEAT_NIGHT_END_HOUR || 8,
+    nightGap: env.HEARTBEAT_NIGHT_PUSH_GAP_HOURS || 2,
+    dayGap: env.HEARTBEAT_DAY_PUSH_GAP_HOURS || 0
+  });
+  const latestAssistant = rows.find(row => row?.role === 'assistant');
+  const sinceAssistant = hoursSince(latestAssistant?.created_at);
+
+  if (pushGapHours > 0 && sinceAssistant !== null && sinceAssistant < pushGapHours) {
+    console.log(JSON.stringify({
+      ok: true,
+      action: 'skip',
+      reason: 'push_window_cooldown',
+      localHour,
+      requiredGapHours: pushGapHours,
+      hoursSinceAssistant: sinceAssistant
+    }));
     return;
   }
 

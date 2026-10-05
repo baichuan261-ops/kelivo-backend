@@ -50,6 +50,21 @@ function shouldSkipForCooldown(rows, cooldownHours, now = Date.now()) {
   };
 }
 
+function isHourInWindow(hour, startHour, endHour) {
+  if (startHour === endHour) return true;
+  return startHour < endHour
+    ? hour >= startHour && hour < endHour
+    : hour >= startHour || hour < endHour;
+}
+
+function pushGapHoursForLocalHour(hour, options = {}) {
+  const nightStart = Number(options.nightStart ?? 2);
+  const nightEnd = Number(options.nightEnd ?? 8);
+  const nightGap = Math.max(0, Number(options.nightGap ?? 2));
+  const dayGap = Math.max(0, Number(options.dayGap ?? 0));
+  return isHourInWindow(hour, nightStart, nightEnd) ? nightGap : dayGap;
+}
+
 function buildHeartbeatMessages({ rows, memories, nowText, characterName }) {
   const history = (rows || [])
     .slice()
@@ -80,6 +95,8 @@ module.exports = {
   buildHeartbeatMessages,
   cleanText,
   hoursSince,
+  isHourInWindow,
   parseDecision,
+  pushGapHoursForLocalHour,
   shouldSkipForCooldown
 };

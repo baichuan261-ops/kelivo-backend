@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   buildHeartbeatMessages,
   parseDecision,
+  pushGapHoursForLocalHour,
   shouldSkipForCooldown
 } = require('../proactive-core');
 
@@ -38,4 +39,11 @@ test('heartbeat context restores chronological order', () => {
     characterName: '沈凛'
   });
   assert.deepEqual(messages.slice(1).map(item => item.content), ['先说', '后说']);
+});
+
+test('night push window uses two-hour gap from 02:00 through 07:59', () => {
+  assert.equal(pushGapHoursForLocalHour(1), 0);
+  assert.equal(pushGapHoursForLocalHour(2), 2);
+  assert.equal(pushGapHoursForLocalHour(7), 2);
+  assert.equal(pushGapHoursForLocalHour(8), 0);
 });
