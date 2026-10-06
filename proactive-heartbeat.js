@@ -3,6 +3,8 @@
 const {
   buildHeartbeatMessages,
   hoursSince,
+  isHourlyWakeMinute,
+  isTooSimilarToRecent,
   parseDecision,
   pushGapHoursForLocalHour,
   shouldSkipForCooldown
@@ -90,6 +92,20 @@ async function main() {
   required('TRANSFER_API_URL', TRANSFER_API_URL);
   required('TRANSFER_API_KEY', TRANSFER_API_KEY);
 
+  const localMinute = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: TIME_ZONE,
+    minute: 'numeric'
+  }).format(new Date()));
+  if (!isHourlyWakeMinute(localMinute)) {
+    console.log(JSON.stringify({
+      ok: true,
+      action: 'skip',
+      reason: 'outside_hourly_wake_slot',
+      localMinute
+    }));
+    return;
+  }
+
   const rows = await supabase('GET', 'messages', {
     select: 'id,role,content,created_at,visible',
     session_id: `eq.${SESSION_ID}`,
@@ -106,6 +122,36 @@ async function main() {
   const cooldown = shouldSkipForCooldown(rows, COOLDOWN_HOURS);
   if (cooldown.skip) {
     console.log(JSON.stringify({ ok: true, action: 'skip', reason: 'cooldown', hours: cooldown.hours }));
+    return;
+  }
+
+  const localHour = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone: TIME_ZONE,
+    hour: 'numeric',
+    hourCycle: 'h23'
+  }).format(new Date()));
+  // Guardrails are enforced in code so an accidentally frequent Render
+  // schedule or a zero-valued environment variable cannot cause push bursts.
+  const nightGap = Math.max(2, Number(env.HEARTBEAT_NIGHT_PUSH_GAP_HOURS || 2));
+  const dayGap = Math.max(1, Number(env.HEARTBEAT_DAY_PUSH_GAP_HOURS || 1));
+  const pushGapHours = pushGapHoursForLocalHour(localHour, {
+    nightStart: env.HEARTBEAT_NIGHT_START_HOUR || 2,
+    nightEnd: env.HEARTBEAT_NIGHT_END_HOUR || 8,
+    nightGap,
+    dayGap
+  });
+  const latestAssistant = rows.find(row => row?.role === 'assistant');
+  const sinceAssistant = hoursSince(latestAssistant?.created_at);
+
+  if (sinceAssistant !== null && sinceAssistant < pushGapHours) {
+    console.log(JSON.stringify({
+      ok: true,
+      action: 'skip',
+      reason: 'push_window_cooldown',
+      localHour,
+      requiredGapHours: pushGapHours,
+      hoursSinceAssistant: sinceAssistant
+    }));
     return;
   }
 
@@ -159,28 +205,11 @@ async function main() {
     return;
   }
 
-  const localHour = Number(new Intl.DateTimeFormat('en-US', {
-    timeZone: TIME_ZONE,
-    hour: 'numeric',
-    hourCycle: 'h23'
-  }).format(new Date()));
-  const pushGapHours = pushGapHoursForLocalHour(localHour, {
-    nightStart: env.HEARTBEAT_NIGHT_START_HOUR || 2,
-    nightEnd: env.HEARTBEAT_NIGHT_END_HOUR || 8,
-    nightGap: env.HEARTBEAT_NIGHT_PUSH_GAP_HOURS || 2,
-    dayGap: env.HEARTBEAT_DAY_PUSH_GAP_HOURS || 0
-  });
-  const latestAssistant = rows.find(row => row?.role === 'assistant');
-  const sinceAssistant = hoursSince(latestAssistant?.created_at);
-
-  if (pushGapHours > 0 && sinceAssistant !== null && sinceAssistant < pushGapHours) {
+  if (isTooSimilarToRecent(decision.message, rows)) {
     console.log(JSON.stringify({
       ok: true,
       action: 'skip',
-      reason: 'push_window_cooldown',
-      localHour,
-      requiredGapHours: pushGapHours,
-      hoursSinceAssistant: sinceAssistant
+      reason: 'too_similar_to_recent'
     }));
     return;
   }

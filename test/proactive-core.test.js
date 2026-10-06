@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildHeartbeatMessages,
+  isHourlyWakeMinute,
+  isTooSimilarToRecent,
   parseDecision,
   pushGapHoursForLocalHour,
   shouldSkipForCooldown
@@ -46,4 +48,25 @@ test('night push window uses two-hour gap from 02:00 through 07:59', () => {
   assert.equal(pushGapHoursForLocalHour(2), 2);
   assert.equal(pushGapHoursForLocalHour(7), 2);
   assert.equal(pushGapHoursForLocalHour(8), 0);
+});
+
+test('similar proactive messages are suppressed', () => {
+  const rows = [
+    { role: 'assistant', content: '早上记得先喝一点水，再慢慢开始今天的事情。' }
+  ];
+  assert.equal(
+    isTooSimilarToRecent('早上记得先喝点水，再慢慢开始今天的事情。', rows),
+    true
+  );
+  assert.equal(
+    isTooSimilarToRecent('昨晚你提到的那本书，我又想到一个不同的角度。', rows),
+    false
+  );
+});
+
+test('only the top of each hour is an automatic wake slot', () => {
+  assert.equal(isHourlyWakeMinute(0), true);
+  assert.equal(isHourlyWakeMinute(4), true);
+  assert.equal(isHourlyWakeMinute(5), false);
+  assert.equal(isHourlyWakeMinute(55), false);
 });
