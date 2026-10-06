@@ -151,9 +151,12 @@ console.log(
 
 // 中转 API 单次请求最长等待时间。
 const UPSTREAM_TIMEOUT_MS =
-    Math.max(
-        Number(process.env.UPSTREAM_TIMEOUT_MS) || 240000,
-        10000
+    Math.min(
+        Math.max(
+            Number(process.env.UPSTREAM_TIMEOUT_MS) || 120000,
+            30000
+        ),
+        120000
     );
 
 // 记忆压缩不是正常聊天链路的一部分，使用更短的超时时间。
@@ -165,6 +168,7 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
 
 const MAX_TOOL_CONTEXT_MESSAGES = 20;
 const EMPTY_UPSTREAM_RETRY_LIMIT = 1;
+const TIMEOUT_UPSTREAM_RETRY_LIMIT = 1;
 
 // Gemini 的输出额度可能同时覆盖思考与正文，2048 容易耗尽。
 function resolveChatMaxTokens(model, requested) {
@@ -3083,11 +3087,39 @@ const hasToolContext =
                 }
             }
 
+            async function callUpstreamWithTimeoutRetry(messages) {
+                for (
+                    let attempt = 0;
+                    attempt <= TIMEOUT_UPSTREAM_RETRY_LIMIT;
+                    attempt++
+                ) {
+                    try {
+                        return await callUpstream(messages);
+                    } catch (error) {
+                        const canRetry =
+                            error?.upstreamTimeout &&
+                            !error?.clientAborted &&
+                            attempt < TIMEOUT_UPSTREAM_RETRY_LIMIT;
+
+                        if (!canRetry) {
+                            throw error;
+                        }
+
+                        console.log(
+                            '🔄 中转 API 超时自动重试 request=' +
+                            requestId +
+                            ' attempt=' +
+                            (attempt + 2)
+                        );
+                    }
+                }
+            }
+
             async function callUpstreamWithEmptyRetry(messages) {
                 let result;
 
                 for (let attempt = 0; attempt <= EMPTY_UPSTREAM_RETRY_LIMIT; attempt++) {
-                    result = await callUpstream(messages);
+                    result = await callUpstreamWithTimeoutRetry(messages);
 
                     if (hasAssistantOutput(result)) {
                         return result;
