@@ -16,15 +16,15 @@ const SUPABASE_TIMEOUT_MS = Math.max(
   2000
 );
 const INNER_CHAT_TIMEOUT_MS = Math.max(
-  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 540000,
-  540000
+  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 210000,
+  210000
 );
 const GATEWAY_REQUEST_TIMEOUT_MS = Math.max(
-  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 900000,
-  900000
+  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 300000,
+  300000
 );
 
-const SERVICE_VERSION = '2026-10-06-timeout-retry-v2';
+const SERVICE_VERSION = '2026-10-06-bounded-fallback-v3';
 
 const MEMORY_TOOL_NAMES = new Set([
   'create_memory',
@@ -1404,6 +1404,13 @@ app.get(
 
       version:
         SERVICE_VERSION,
+
+      timeoutPolicy: {
+        innerChatMs:
+          INNER_CHAT_TIMEOUT_MS,
+        gatewayRequestMs:
+          GATEWAY_REQUEST_TIMEOUT_MS
+      },
 
       inner:
         INNER_URL,

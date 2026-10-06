@@ -153,10 +153,10 @@ console.log(
 const UPSTREAM_TIMEOUT_MS =
     Math.min(
         Math.max(
-            Number(process.env.UPSTREAM_TIMEOUT_MS) || 120000,
+            Number(process.env.UPSTREAM_TIMEOUT_MS) || 90000,
             30000
         ),
-        120000
+        90000
     );
 
 // 记忆压缩不是正常聊天链路的一部分，使用更短的超时时间。
@@ -167,7 +167,7 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
     );
 
 const MAX_TOOL_CONTEXT_MESSAGES = 20;
-const EMPTY_UPSTREAM_RETRY_LIMIT = 1;
+const EMPTY_UPSTREAM_RETRY_LIMIT = 0;
 const TIMEOUT_UPSTREAM_RETRY_LIMIT = 1;
 
 // Gemini 的输出额度可能同时覆盖思考与正文，2048 容易耗尽。
@@ -2764,12 +2764,17 @@ const hasToolContext =
             // ==================================================
 
             async function callUpstream(
-                messages
+                messages,
+                modelOverride = null
             ) {
+                const effectiveModel =
+                    modelOverride ||
+                    req.body.model ||
+                    MODEL_NAME;
+
                 const upstreamBody = {
                     model:
-                        req.body.model ||
-                        MODEL_NAME,
+                        effectiveModel,
 
                     messages:
                         messages,
@@ -2794,7 +2799,7 @@ const hasToolContext =
 
                     max_tokens:
                         resolveChatMaxTokens(
-                            req.body.model || MODEL_NAME,
+                            effectiveModel,
                             req.body.max_tokens
                         )
                 };
@@ -3088,13 +3093,25 @@ const hasToolContext =
             }
 
             async function callUpstreamWithTimeoutRetry(messages) {
+                const requestedModel =
+                    req.body.model ||
+                    MODEL_NAME;
+
                 for (
                     let attempt = 0;
                     attempt <= TIMEOUT_UPSTREAM_RETRY_LIMIT;
                     attempt++
                 ) {
                     try {
-                        return await callUpstream(messages);
+                        const retryModel =
+                            attempt > 0
+                                ? MODEL_NAME
+                                : requestedModel;
+
+                        return await callUpstream(
+                            messages,
+                            retryModel
+                        );
                     } catch (error) {
                         const canRetry =
                             error?.upstreamTimeout &&
@@ -3109,7 +3126,9 @@ const hasToolContext =
                             '🔄 中转 API 超时自动重试 request=' +
                             requestId +
                             ' attempt=' +
-                            (attempt + 2)
+                            (attempt + 2) +
+                            ' fallbackModel=' +
+                            MODEL_NAME
                         );
                     }
                 }
