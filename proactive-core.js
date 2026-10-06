@@ -57,9 +57,12 @@ function isHourInWindow(hour, startHour, endHour) {
     : hour >= startHour || hour < endHour;
 }
 
-function isHourlyWakeMinute(minute, graceMinutes = 4) {
+function isHalfHourlyWakeMinute(minute, graceMinutes = 4) {
   const value = Number(minute);
-  return Number.isFinite(value) && value >= 0 && value <= graceMinutes;
+  return Number.isFinite(value) && value >= 0 && (
+    value <= graceMinutes ||
+    (value >= 30 && value <= 30 + graceMinutes)
+  );
 }
 
 function pushGapHoursForLocalHour(hour, options = {}) {
@@ -136,7 +139,7 @@ module.exports = {
   buildHeartbeatMessages,
   cleanText,
   hoursSince,
-  isHourlyWakeMinute,
+  isHalfHourlyWakeMinute,
   isHourInWindow,
   parseDecision,
   pushGapHoursForLocalHour,

@@ -3,7 +3,7 @@
 const {
   buildHeartbeatMessages,
   hoursSince,
-  isHourlyWakeMinute,
+  isHalfHourlyWakeMinute,
   isTooSimilarToRecent,
   parseDecision,
   pushGapHoursForLocalHour,
@@ -96,11 +96,11 @@ async function main() {
     timeZone: TIME_ZONE,
     minute: 'numeric'
   }).format(new Date()));
-  if (!isHourlyWakeMinute(localMinute)) {
+  if (!isHalfHourlyWakeMinute(localMinute)) {
     console.log(JSON.stringify({
       ok: true,
       action: 'skip',
-      reason: 'outside_hourly_wake_slot',
+      reason: 'outside_half_hourly_wake_slot',
       localMinute
     }));
     return;
@@ -133,7 +133,7 @@ async function main() {
   // Guardrails are enforced in code so an accidentally frequent Render
   // schedule or a zero-valued environment variable cannot cause push bursts.
   const nightGap = Math.max(2, Number(env.HEARTBEAT_NIGHT_PUSH_GAP_HOURS || 2));
-  const dayGap = Math.max(1, Number(env.HEARTBEAT_DAY_PUSH_GAP_HOURS || 1));
+  const dayGap = Math.max(0.5, Number(env.HEARTBEAT_DAY_PUSH_GAP_HOURS || 0.5));
   const pushGapHours = pushGapHoursForLocalHour(localHour, {
     nightStart: env.HEARTBEAT_NIGHT_START_HOUR || 2,
     nightEnd: env.HEARTBEAT_NIGHT_END_HOUR || 8,

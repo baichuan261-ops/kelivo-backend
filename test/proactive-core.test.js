@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   buildHeartbeatMessages,
-  isHourlyWakeMinute,
+  isHalfHourlyWakeMinute,
   isTooSimilarToRecent,
   parseDecision,
   pushGapHoursForLocalHour,
@@ -64,9 +64,12 @@ test('similar proactive messages are suppressed', () => {
   );
 });
 
-test('only the top of each hour is an automatic wake slot', () => {
-  assert.equal(isHourlyWakeMinute(0), true);
-  assert.equal(isHourlyWakeMinute(4), true);
-  assert.equal(isHourlyWakeMinute(5), false);
-  assert.equal(isHourlyWakeMinute(55), false);
+test('only the top and half of each hour are automatic wake slots', () => {
+  assert.equal(isHalfHourlyWakeMinute(0), true);
+  assert.equal(isHalfHourlyWakeMinute(4), true);
+  assert.equal(isHalfHourlyWakeMinute(5), false);
+  assert.equal(isHalfHourlyWakeMinute(30), true);
+  assert.equal(isHalfHourlyWakeMinute(34), true);
+  assert.equal(isHalfHourlyWakeMinute(35), false);
+  assert.equal(isHalfHourlyWakeMinute(55), false);
 });
