@@ -16,12 +16,12 @@ const SUPABASE_TIMEOUT_MS = Math.max(
   2000
 );
 const INNER_CHAT_TIMEOUT_MS = Math.max(
-  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 120000,
-  10000
+  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 300000,
+  300000
 );
 const GATEWAY_REQUEST_TIMEOUT_MS = Math.max(
-  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 150000,
-  30000
+  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 600000,
+  600000
 );
 
 const MEMORY_TOOL_NAMES = new Set([
@@ -996,8 +996,23 @@ async function callInner(
     throw error;
   }
 
-  const text =
-    await response.text();
+  let text;
+
+  try {
+    text =
+      await response.text();
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      return {
+        status: 504,
+        ok: false,
+        text: JSON.stringify({ error: '聊天处理超时，请稍后重试' }),
+        json: { error: '聊天处理超时，请稍后重试' }
+      };
+    }
+
+    throw error;
+  }
 
   let json = null;
 
