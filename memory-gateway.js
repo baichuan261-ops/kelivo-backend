@@ -16,13 +16,15 @@ const SUPABASE_TIMEOUT_MS = Math.max(
   2000
 );
 const INNER_CHAT_TIMEOUT_MS = Math.max(
-  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 300000,
-  300000
+  Number(process.env.INNER_CHAT_TIMEOUT_MS) || 540000,
+  540000
 );
 const GATEWAY_REQUEST_TIMEOUT_MS = Math.max(
-  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 600000,
-  600000
+  Number(process.env.GATEWAY_REQUEST_TIMEOUT_MS) || 900000,
+  900000
 );
+
+const SERVICE_VERSION = '2026-10-06-timeout-retry-v2';
 
 const MEMORY_TOOL_NAMES = new Set([
   'create_memory',
@@ -1399,6 +1401,9 @@ app.get(
 
       service:
         'kelivo-memory-gateway',
+
+      version:
+        SERVICE_VERSION,
 
       inner:
         INNER_URL,
