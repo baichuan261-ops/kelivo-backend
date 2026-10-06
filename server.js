@@ -170,7 +170,7 @@ const MAX_TOOL_CONTEXT_MESSAGES = 20;
 const EMPTY_UPSTREAM_RETRY_LIMIT = 0;
 const TIMEOUT_UPSTREAM_RETRY_LIMIT = 1;
 
-// Gemini 的输出额度可能同时覆盖思考与正文，2048 容易耗尽。
+// 中转站对超大 Gemini 输出请求容易长时间无响应；保留适度余量即可。
 function resolveChatMaxTokens(model, requested) {
     const parsed = Number(requested);
     const valid = Number.isFinite(parsed) && parsed > 0;
@@ -180,8 +180,8 @@ function resolveChatMaxTokens(model, requested) {
     }
     const configured = Number(process.env.GEMINI_MIN_OUTPUT_TOKENS);
     const minimum = Number.isFinite(configured) && configured > 0
-        ? Math.floor(configured)
-        : 8192;
+        ? Math.min(Math.floor(configured), 4096)
+        : 4096;
     return Math.max(requestedTokens, minimum);
 }
 
@@ -1287,13 +1287,13 @@ async function supabaseUpdate(
 // 上下文整理：近期对话 + 最近变化候选
 // ==================================================
 
-const RECENT_CONTEXT_MESSAGE_LIMIT = 48;
-const RECENT_CONTEXT_CHAR_LIMIT = 24000;
+const RECENT_CONTEXT_MESSAGE_LIMIT = 20;
+const RECENT_CONTEXT_CHAR_LIMIT = 10000;
 const RECENT_CONTEXT_HOURS = 18;
 const RECENT_CHANGE_SCAN_LIMIT = 100;
 const RECENT_CHANGE_MAX_ITEMS = 6;
 const RECENT_CHANGE_CHAR_LIMIT = 3500;
-const MEMORY_CONTEXT_MAX_ITEMS = 30;
+const MEMORY_CONTEXT_MAX_ITEMS = 20;
 const MEMORY_CONTEXT_CHAR_LIMIT = 6000;
 
 // ==================================================
@@ -3116,6 +3116,7 @@ const hasToolContext =
                         const canRetry =
                             error?.upstreamTimeout &&
                             !error?.clientAborted &&
+                            String(requestedModel) !== String(MODEL_NAME) &&
                             attempt < TIMEOUT_UPSTREAM_RETRY_LIMIT;
 
                         if (!canRetry) {

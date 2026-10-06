@@ -24,7 +24,7 @@ const GATEWAY_REQUEST_TIMEOUT_MS = Math.max(
   300000
 );
 
-const SERVICE_VERSION = '2026-10-06-bounded-fallback-v3';
+const SERVICE_VERSION = '2026-10-06-compact-prompt-v4';
 
 const MEMORY_TOOL_NAMES = new Set([
   'create_memory',
