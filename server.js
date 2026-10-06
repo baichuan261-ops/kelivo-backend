@@ -2765,7 +2765,8 @@ const hasToolContext =
 
             async function callUpstream(
                 messages,
-                modelOverride = null
+                modelOverride = null,
+                disableTools = false
             ) {
                 const effectiveModel =
                     modelOverride ||
@@ -2780,7 +2781,7 @@ const hasToolContext =
                         messages,
 
                     tools:
-                        modelTools.length > 0
+                        !disableTools && modelTools.length > 0
                             ? modelTools
                             : undefined,
 
@@ -3110,13 +3111,14 @@ const hasToolContext =
 
                         return await callUpstream(
                             messages,
-                            retryModel
+                            retryModel,
+                            attempt > 0
                         );
                     } catch (error) {
                         const canRetry =
                             error?.upstreamTimeout &&
                             !error?.clientAborted &&
-                            String(requestedModel) !== String(MODEL_NAME) &&
+                            modelTools.length > 0 &&
                             attempt < TIMEOUT_UPSTREAM_RETRY_LIMIT;
 
                         if (!canRetry) {
@@ -3128,7 +3130,8 @@ const hasToolContext =
                             requestId +
                             ' attempt=' +
                             (attempt + 2) +
-                            ' fallbackModel=' +
+                            ' fallback=without_tools' +
+                            ' model=' +
                             MODEL_NAME
                         );
                     }
@@ -3161,48 +3164,6 @@ const hasToolContext =
 
                 return result;
             }
-
-            // The upstream model can legitimately take several minutes. During
-            // that wait Render's edge, a mobile carrier, or a VPN may close an
-            // otherwise idle HTTP response. Leading whitespace is valid JSON,
-            // so send a tiny heartbeat without changing the response contract.
-            const originalJson = res.json.bind(res);
-            let responseHeartbeat = setInterval(() => {
-                if (!res.writableEnded && !res.destroyed) {
-                    if (!res.headersSent) {
-                        res.setHeader(
-                            'Content-Type',
-                            'application/json; charset=utf-8'
-                        );
-                    }
-                    res.write(' ');
-                }
-            }, 15000);
-
-            responseHeartbeat.unref?.();
-
-            const stopResponseHeartbeat = () => {
-                if (responseHeartbeat) {
-                    clearInterval(responseHeartbeat);
-                    responseHeartbeat = null;
-                }
-            };
-
-            res.once('close', stopResponseHeartbeat);
-            res.once('finish', stopResponseHeartbeat);
-
-            res.json = body => {
-                stopResponseHeartbeat();
-
-                if (res.headersSent) {
-                    if (!res.writableEnded && !res.destroyed) {
-                        res.end(JSON.stringify(body));
-                    }
-                    return res;
-                }
-
-                return originalJson(body);
-            };
 
             console.log(
                 '🚀 调用中转 API...'
