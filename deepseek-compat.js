@@ -77,6 +77,12 @@ function buildToolContinuationMessage(message, toolCalls) {
     );
 }
 
+function resolveToolContinuationEffort(requested, fallback = 'low') {
+    return normalizeReasoningEffort(requested) ||
+        normalizeReasoningEffort(fallback) ||
+        'low';
+}
+
 function hasAssistantOutput(data) {
     const message = data?.choices?.[0]?.message;
     const content = typeof message?.content === 'string'
@@ -96,5 +102,6 @@ module.exports = {
     hasAssistantOutput,
     normalizeReasoningEffort,
     normalizeThinkingType,
-    resolveDeepSeekThinking
+    resolveDeepSeekThinking,
+    resolveToolContinuationEffort
 };

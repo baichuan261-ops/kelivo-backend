@@ -6,7 +6,8 @@ const {
     buildAssistantMessage,
     buildToolContinuationMessage,
     hasAssistantOutput,
-    resolveDeepSeekThinking
+    resolveDeepSeekThinking,
+    resolveToolContinuationEffort
 } = require('../deepseek-compat');
 
 test('DeepSeek thinking defaults to enabled and remains optional', () => {
@@ -85,4 +86,11 @@ test('memory gateway continuation preserves reasoning and only selected calls', 
         reasoning_content: 'reasoning state required by DeepSeek',
         tool_calls: [memoryCall]
     });
+});
+
+test('memory tool continuation is fast by default but honors explicit effort', () => {
+    assert.equal(resolveToolContinuationEffort(undefined), 'low');
+    assert.equal(resolveToolContinuationEffort('high'), 'high');
+    assert.equal(resolveToolContinuationEffort('max'), 'max');
+    assert.equal(resolveToolContinuationEffort('medium'), 'high');
 });
