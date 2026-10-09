@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
     buildAssistantMessage,
+    buildToolContinuationMessage,
     hasAssistantOutput,
     resolveDeepSeekThinking
 } = require('../deepseek-compat');
@@ -57,5 +58,31 @@ test('assistant responses preserve reasoning_content for tool continuation', () 
         content: null,
         reasoning_content: 'reasoning state',
         tool_calls: [{ id: 'call_1', type: 'function' }]
+    });
+});
+
+test('memory gateway continuation preserves reasoning and only selected calls', () => {
+    const memoryCall = {
+        id: 'memory_1',
+        type: 'function',
+        function: { name: 'read_memory', arguments: '{}' }
+    };
+    const clientCall = {
+        id: 'client_1',
+        type: 'function',
+        function: { name: 'get_weather', arguments: '{}' }
+    };
+
+    const message = buildToolContinuationMessage({
+        content: null,
+        reasoning_content: 'reasoning state required by DeepSeek',
+        tool_calls: [memoryCall, clientCall]
+    }, [memoryCall]);
+
+    assert.deepEqual(message, {
+        role: 'assistant',
+        content: null,
+        reasoning_content: 'reasoning state required by DeepSeek',
+        tool_calls: [memoryCall]
     });
 });
