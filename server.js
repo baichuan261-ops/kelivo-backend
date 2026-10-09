@@ -1287,8 +1287,8 @@ async function supabaseUpdate(
 // 上下文整理：近期对话 + 最近变化候选
 // ==================================================
 
-const RECENT_CONTEXT_MESSAGE_LIMIT = 20;
-const RECENT_CONTEXT_CHAR_LIMIT = 10000;
+const RECENT_CONTEXT_MESSAGE_LIMIT = 32;
+const RECENT_CONTEXT_CHAR_LIMIT = 16000;
 const RECENT_CONTEXT_HOURS = 18;
 const RECENT_CHANGE_SCAN_LIMIT = 100;
 const RECENT_CHANGE_MAX_ITEMS = 6;
@@ -1489,18 +1489,18 @@ function buildRecentChangeMessages(messages) {
             continue;
         }
 
+        // 仅补充用户原话，避免旧助手的机械台词被重新示范。
         const block = [current];
-
-        if (i + 1 < source.length) {
-            const next = normalizeHistoryMessage(source[i + 1]);
-
-            if (next && next.role === 'assistant') {
-                block.push(next);
-            }
-        }
+        const correctionMarkers = [
+            '不要再', '以后不要', '不喜欢', '讨厌',
+            '别再', '重复', '机械', '刻板', '冷冰冰'
+        ];
+        const isCorrection = correctionMarkers.some(
+            marker => current.content.includes(marker)
+        );
 
         candidates.push({
-            score,
+            score: score + (isCorrection ? 6 : 0),
             index: i,
             block
         });
