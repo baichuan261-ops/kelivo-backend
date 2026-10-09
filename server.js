@@ -1,4 +1,9 @@
 const express = require('express');
+const {
+    buildAssistantMessage,
+    hasAssistantOutput,
+    resolveDeepSeekThinking
+} = require('./deepseek-compat');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -183,8 +188,13 @@ const MEMORY_COMPRESSION_TIMEOUT_MS =
     );
 
 const MAX_TOOL_CONTEXT_MESSAGES = 20;
-const EMPTY_UPSTREAM_RETRY_LIMIT = 0;
+const EMPTY_UPSTREAM_RETRY_LIMIT = 1;
 const TIMEOUT_UPSTREAM_RETRY_LIMIT = 1;
+
+const DEEPSEEK_THINKING =
+    process.env.DEEPSEEK_THINKING || 'enabled';
+const DEEPSEEK_REASONING_EFFORT =
+    process.env.DEEPSEEK_REASONING_EFFORT || 'high';
 
 // 中转站对超大 Gemini 输出请求容易长时间无响应；保留适度余量即可。
 function resolveChatMaxTokens(model, requested) {
@@ -306,19 +316,6 @@ function buildToolContinuationContext(messages, maxMessages = MAX_TOOL_CONTEXT_M
     }
 
     return { messages: repaired, start, droppedOrphans };
-}
-
-function hasAssistantOutput(data) {
-    const message = data?.choices?.[0]?.message;
-    const content = typeof message?.content === 'string'
-        ? message.content.trim()
-        : message?.content;
-
-    return Boolean(
-        content ||
-        (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) ||
-        data?.reply || data?.result || data?.content || data?.output || data?.response
-    );
 }
 
 // 数据库偶发不可用时不能无限拖住聊天请求。
@@ -2776,7 +2773,8 @@ const hasToolContext =
             async function callUpstream(
                 messages,
                 modelOverride = null,
-                disableTools = false
+                disableTools = false,
+                forceNonThinking = false
             ) {
                 const effectiveModel =
                     resolveRequestedModel(
@@ -2816,8 +2814,16 @@ const hasToolContext =
                 };
 
                 if (USE_DEEPSEEK_DIRECT) {
-                    // 日常聊天优先非思考模式，避免旧客户端的推理参数干扰。
-                    upstreamBody.thinking = { type: 'disabled' };
+                    const thinkingConfig = resolveDeepSeekThinking(
+                        req.body,
+                        {
+                            defaultThinking: DEEPSEEK_THINKING,
+                            defaultEffort: DEEPSEEK_REASONING_EFFORT,
+                            forceDisabled: forceNonThinking
+                        }
+                    );
+                    upstreamBody.thinking = thinkingConfig.thinking;
+                    upstreamBody.reasoning_effort = thinkingConfig.reasoning_effort;
                 }
 
                 if (
@@ -3110,7 +3116,7 @@ const hasToolContext =
                 }
             }
 
-            async function callUpstreamWithTimeoutRetry(messages) {
+            async function callUpstreamWithTimeoutRetry(messages, emptyRetry = false) {
                 const requestedModel =
                     resolveRequestedModel(req.body.model);
 
@@ -3125,7 +3131,8 @@ const hasToolContext =
                         return await callUpstream(
                             messages,
                             retryModel,
-                            attempt > 0
+                            attempt > 0,
+                            emptyRetry
                         );
                     } catch (error) {
                         const canRetry =
@@ -3155,7 +3162,10 @@ const hasToolContext =
                 let result;
 
                 for (let attempt = 0; attempt <= EMPTY_UPSTREAM_RETRY_LIMIT; attempt++) {
-                    result = await callUpstreamWithTimeoutRetry(messages);
+                    result = await callUpstreamWithTimeoutRetry(
+                        messages,
+                        attempt > 0
+                    );
 
                     if (hasAssistantOutput(result)) {
                         return result;
@@ -3171,7 +3181,10 @@ const hasToolContext =
                     );
 
                     if (attempt < EMPTY_UPSTREAM_RETRY_LIMIT) {
-                        console.log('🔄 空结果自动重试 request=' + requestId);
+                        console.log(
+                            '🔄 空结果自动重试 request=' + requestId +
+                            (USE_DEEPSEEK_DIRECT ? ' fallback=non_thinking' : '')
+                        );
                     }
                 }
 
@@ -3370,18 +3383,10 @@ const hasToolContext =
                     return res.json({
                         choices: [
                             {
-                                message: {
-                                    role:
-                                        'assistant',
-
-                                    content:
-                                        currentMessage
-                                            .content ??
-                                        null,
-
-                                    tool_calls:
-                                        currentToolCalls
-                                },
+                                message: buildAssistantMessage(
+                                    currentMessage,
+                                    { includeToolCalls: true }
+                                ),
 
                                 finish_reason:
                                     data
@@ -3538,18 +3543,10 @@ const hasToolContext =
                 return res.json({
                     choices: [
                         {
-                            message: {
-                                role:
-                                    'assistant',
-
-                                content:
-                                    assistantMessage
-                                        .content ??
-                                    null,
-
-                                tool_calls:
-                                    toolCalls
-                            },
+                            message: buildAssistantMessage(
+                                assistantMessage,
+                                { includeToolCalls: true }
+                            ),
 
                             finish_reason:
                                 data
@@ -3656,11 +3653,8 @@ const hasToolContext =
                 choices: [
                     {
                         message: {
-                            role:
-                                'assistant',
-
-                            content:
-                                String(reply)
+                            ...buildAssistantMessage(assistantMessage),
+                            content: String(reply)
                         },
                         finish_reason:
                             data.choices?.[0]?.finish_reason || 'stop'
