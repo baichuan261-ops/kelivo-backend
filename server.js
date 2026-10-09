@@ -3138,6 +3138,7 @@ const hasToolContext =
                         const canRetry =
                             error?.upstreamTimeout &&
                             !error?.clientAborted &&
+                            !hasToolContext &&
                             modelTools.length > 0 &&
                             attempt < TIMEOUT_UPSTREAM_RETRY_LIMIT;
 

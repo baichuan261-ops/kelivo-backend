@@ -1,6 +1,9 @@
 const express = require('express');
 const { spawn } = require('child_process');
-const { buildToolContinuationMessage } = require('./deepseek-compat');
+const {
+  buildToolContinuationMessage,
+  resolveToolContinuationEffort
+} = require('./deepseek-compat');
 
 const app = express();
 
@@ -1377,7 +1380,16 @@ async function handleChat(
           : original.tool_choice,
 
       stream:
-        false
+        false,
+
+      // A memory lookup already requires a second model request. Keep that
+      // continuation responsive unless the client explicitly requested an
+      // effort level; otherwise Kelivo can close the socket before it ends.
+      reasoning_effort:
+        resolveToolContinuationEffort(
+          original.reasoning_effort,
+          process.env.MEMORY_TOOL_REASONING_EFFORT || 'low'
+        )
     };
   }
 }
