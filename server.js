@@ -121,22 +121,38 @@ const SUPABASE_URL =
 const SUPABASE_KEY =
     process.env.SUPABASE_KEY;
 
-const TRANSFER_API_URL =
-    String(process.env.TRANSFER_API_URL || '').trim();
-
-const TRANSFER_API_KEY =
-    String(process.env.TRANSFER_API_KEY || '')
+// 可选的 DeepSeek 官方直连：仅在配置 DEEPSEEK_API_KEY 后启用。
+// 未配置时保留原有中转站，避免部署时意外中断聊天。
+const DEEPSEEK_API_KEY =
+    String(process.env.DEEPSEEK_API_KEY || '')
+        .trim()
+        .replace(/^Bearer\s+/i, '');
+const USE_DEEPSEEK_DIRECT = Boolean(DEEPSEEK_API_KEY);
+const TRANSFER_API_URL = USE_DEEPSEEK_DIRECT
+    ? 'https://api.deepseek.com/chat/completions'
+    : String(process.env.TRANSFER_API_URL || '').trim();
+const TRANSFER_API_KEY = USE_DEEPSEEK_DIRECT
+    ? DEEPSEEK_API_KEY
+    : String(process.env.TRANSFER_API_KEY || '')
         .trim()
         .replace(/^Bearer\s+/i, '');
 
 const CLIENT_API_KEY =
     process.env.CLIENT_API_KEY;
 
-const MODEL_NAME =
-    String(
+const MODEL_NAME = USE_DEEPSEEK_DIRECT
+    ? 'deepseek-flash'
+    : String(
         process.env.MODEL_NAME ||
         'claude-3.5-sonnet'
     ).trim();
+
+// DeepSeek 直连时不接受 Kelivo 发来的旧 Gemini 模型名。
+function resolveRequestedModel(requested) {
+    return USE_DEEPSEEK_DIRECT
+        ? 'deepseek-flash'
+        : (requested || MODEL_NAME);
+}
 
 console.log(
     '🔐 中转配置: url=' +
@@ -2123,8 +2139,7 @@ app.post(
 
                 const titleBody = {
                     model:
-                        req.body.model ||
-                        MODEL_NAME,
+                        resolveRequestedModel(req.body.model),
 
                     messages:
                         req.body.messages,
@@ -2764,9 +2779,9 @@ const hasToolContext =
                 disableTools = false
             ) {
                 const effectiveModel =
-                    modelOverride ||
-                    req.body.model ||
-                    MODEL_NAME;
+                    resolveRequestedModel(
+                        modelOverride || req.body.model
+                    );
 
                 const upstreamBody = {
                     model:
@@ -2800,7 +2815,13 @@ const hasToolContext =
                         )
                 };
 
+                if (USE_DEEPSEEK_DIRECT) {
+                    // 日常聊天优先非思考模式，避免旧客户端的推理参数干扰。
+                    upstreamBody.thinking = { type: 'disabled' };
+                }
+
                 if (
+                    !USE_DEEPSEEK_DIRECT &&
                     req.body.reasoning_effort !==
                     undefined
                 ) {
@@ -2809,6 +2830,7 @@ const hasToolContext =
                 }
 
                 if (
+                    !USE_DEEPSEEK_DIRECT &&
                     req.body.thinking !==
                     undefined
                 ) {
@@ -3090,8 +3112,7 @@ const hasToolContext =
 
             async function callUpstreamWithTimeoutRetry(messages) {
                 const requestedModel =
-                    req.body.model ||
-                    MODEL_NAME;
+                    resolveRequestedModel(req.body.model);
 
                 for (
                     let attempt = 0;
@@ -3099,10 +3120,7 @@ const hasToolContext =
                     attempt++
                 ) {
                     try {
-                        const retryModel =
-                            attempt > 0
-                                ? MODEL_NAME
-                                : requestedModel;
+                        const retryModel = requestedModel;
 
                         return await callUpstream(
                             messages,
@@ -3127,7 +3145,7 @@ const hasToolContext =
                             (attempt + 2) +
                             ' fallback=without_tools' +
                             ' model=' +
-                            MODEL_NAME
+                            requestedModel
                         );
                     }
                 }
