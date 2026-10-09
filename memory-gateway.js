@@ -1,5 +1,6 @@
 const express = require('express');
 const { spawn } = require('child_process');
+const { buildToolContinuationMessage } = require('./deepseek-compat');
 
 const app = express();
 
@@ -1295,17 +1296,10 @@ async function handleChat(
     messages = [
       ...messages,
 
-      {
-        role:
-          'assistant',
-
-        content:
-          assistant.content ??
-          null,
-
-        tool_calls:
-          memoryCalls
-      }
+      buildToolContinuationMessage(
+        assistant,
+        memoryCalls
+      )
     ];
 
     for (

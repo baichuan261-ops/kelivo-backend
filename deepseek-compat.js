@@ -67,6 +67,16 @@ function buildAssistantMessage(message, { includeToolCalls = false } = {}) {
     return result;
 }
 
+function buildToolContinuationMessage(message, toolCalls) {
+    return buildAssistantMessage(
+        {
+            ...message,
+            tool_calls: Array.isArray(toolCalls) ? toolCalls : []
+        },
+        { includeToolCalls: true }
+    );
+}
+
 function hasAssistantOutput(data) {
     const message = data?.choices?.[0]?.message;
     const content = typeof message?.content === 'string'
@@ -82,6 +92,7 @@ function hasAssistantOutput(data) {
 
 module.exports = {
     buildAssistantMessage,
+    buildToolContinuationMessage,
     hasAssistantOutput,
     normalizeReasoningEffort,
     normalizeThinkingType,
