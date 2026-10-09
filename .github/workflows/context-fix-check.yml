@@ -1,0 +1,34 @@
+name: Context fix checks
+on:
+  pull_request:
+    paths:
+      - 'server.js'
+      - '.github/workflows/context-fix-check.yml'
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check JavaScript syntax
+        run: node --check server.js
+      - name: Check conversation context safeguards
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const assert = require('assert');
+          const src = fs.readFileSync('server.js', 'utf8');
+          assert.match(src, /RECENT_CONTEXT_MESSAGE_LIMIT = 32/);
+          assert.match(src, /RECENT_CONTEXT_CHAR_LIMIT = 16000/);
+          const start = src.indexOf('function buildRecentChangeMessages(');
+          const end = src.indexOf('function formatRecentChangeForLog(', start);
+          assert(start >= 0 && end > start);
+          const segment = src.slice(start, end);
+          assert.match(segment, /const block = \[current\]/);
+          assert.doesNotMatch(segment, /block\.push\(next\)/);
+          assert.match(segment, /isCorrection \? 6 : 0/);
+          console.log('Context safeguards passed');
+          NODE
