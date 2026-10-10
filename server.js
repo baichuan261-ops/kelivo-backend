@@ -1300,8 +1300,8 @@ async function supabaseUpdate(
 // 上下文整理：近期对话 + 最近变化候选
 // ==================================================
 
-const RECENT_CONTEXT_MESSAGE_LIMIT = 32;
-const RECENT_CONTEXT_CHAR_LIMIT = 16000;
+const RECENT_CONTEXT_MESSAGE_LIMIT = 48;
+const RECENT_CONTEXT_CHAR_LIMIT = 24000;
 const RECENT_CONTEXT_HOURS = 18;
 const RECENT_CHANGE_SCAN_LIMIT = 100;
 const RECENT_CHANGE_MAX_ITEMS = 6;
