@@ -2482,13 +2482,15 @@ app.post(
                         visible:
                             'eq.true',
 
+                        // Fetch the newest rows before the API row cap is applied.
                         order:
-                            'created_at.asc'
+                            'created_at.desc,id.desc',
+                        limit: String(RECENT_CONTEXT_MESSAGE_LIMIT + RECENT_CHANGE_SCAN_LIMIT + 1)
                     }
                 );
 
             const allMessages =
-                allResult.data || [];
+                (allResult.data || []).slice().reverse();
 
             console.log(
                 '📚 当前可见消息数: ' +
@@ -2510,12 +2512,13 @@ app.post(
                             'eq.' + sid,
 
                         order:
-                            'created_at.asc'
+                            'created_at.desc',
+                        limit: String(MEMORY_CONTEXT_MAX_ITEMS)
                     }
                 );
 
             const memories =
-                memResult.data || [];
+                (memResult.data || []).slice().reverse();
 
             const memoryText =
                 buildMemoryContext(memories);
