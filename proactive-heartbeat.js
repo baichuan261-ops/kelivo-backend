@@ -11,6 +11,7 @@ const {
 } = require('./proactive-core');
 
 const env = process.env;
+const { heartbeatEndpoint } = require('./heartbeat-endpoint');
 const SUPABASE_URL = String(env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_KEY = String(env.SUPABASE_KEY || '');
 const TRANSFER_API_URL = String(env.TRANSFER_API_URL || '');
@@ -171,7 +172,7 @@ async function main() {
     ? Math.max(8192, configuredMaxTokens)
     : configuredMaxTokens;
 
-  const response = await fetch(TRANSFER_API_URL, {
+  const response = await fetch(heartbeatEndpoint(TRANSFER_API_URL), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
