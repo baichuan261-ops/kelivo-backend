@@ -13,8 +13,14 @@ test('push history distinguishes delivery and does not treat silence as rejectio
   assert.ok(result[0].content.includes('历史生成记录，是否投递未知'));
   assert.ok(result[0].content.includes('推送服务已接受，用户是否读过未知'));
   assert.ok(result[0].content.includes('不能单独作为持续不发送的理由'));
+  assert.ok(result[0].content.includes('上一条主动消息，以及用户在它之后的回复'));
+  assert.ok(result[0].content.includes('已投递内容'));
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.ok(source.includes("source: 'in.(proactive,proactive_sent)'"));
+  assert.ok(source.includes('日常聊天与主动推送属于同一段连续对话'));
+  assert.ok(!source.includes('不机械附加内心独白'));
+  assert.ok(!source.includes('不每次都抒情'));
+  assert.ok(!source.includes('不用夸张承诺或重复爱意替代真实内容'));
 });
 
 test('chat includes approved principles without old restrictive tool rule', () => {
