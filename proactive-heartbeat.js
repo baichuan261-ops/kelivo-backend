@@ -166,7 +166,19 @@ async function main() {
   const nowText = new Intl.DateTimeFormat('zh-CN', {
     timeZone: TIME_ZONE, dateStyle: 'full', timeStyle: 'long'
   }).format(new Date());
-  const messages = buildHeartbeatMessages({ rows, memories, nowText, characterName: CHARACTER_NAME });
+  let recentPushes = [];
+  try {
+    recentPushes = await supabase('GET', 'messages', {
+      select: 'id,role,content,created_at,source', session_id: `eq.${SESSION_ID}`,
+      role: 'eq.assistant', source: 'in.(proactive,proactive_sent)',
+      order: 'created_at.desc', limit: '30'
+    }) || [];
+  } catch (error) {
+    // Older databases may not have the source column. Do not mislabel chats as delivered pushes.
+    console.warn(JSON.stringify({event:'push_history_unavailable', reason:'Could not read dedicated proactive history'}));
+  }
+  console.log(JSON.stringify({event:'heartbeat_context', latestUserAt:rows.find(row => row.role === 'user')?.created_at || null, latestMessageAt:rows[0]?.created_at || null, recentPushCount:recentPushes.length}));
+  const messages = buildHeartbeatMessages({ rows, memories, nowText, characterName: CHARACTER_NAME, recentPushes });
   const configuredMaxTokens = Math.max(256, Number(env.HEARTBEAT_MAX_TOKENS || 1200));
   const maxTokens = /gemini/i.test(MODEL_NAME)
     ? Math.max(8192, configuredMaxTokens)
@@ -206,7 +218,7 @@ async function main() {
     return;
   }
 
-  if (isTooSimilarToRecent(decision.message, rows)) {
+  if (isTooSimilarToRecent(decision.message, rows) || recentPushes.some(row => isTooSimilarToRecent(decision.message, [row]))) {
     console.log(JSON.stringify({
       ok: true,
       action: 'skip',
@@ -239,6 +251,13 @@ async function main() {
   });
 
   const pushResult = await push(decision.title, decision.message);
+  if (pushResult.delivered && inserted?.[0]?.id) {
+    try {
+      await supabase('PATCH', 'messages', {id:`eq.${inserted[0].id}`, session_id:`eq.${SESSION_ID}`}, {source:'proactive_sent'});
+    } catch (_) {
+      console.warn(JSON.stringify({event:'push_delivery_marker_failed', messageId:inserted[0].id}));
+    }
+  }
   console.log(JSON.stringify({
     ok: true,
     action: 'sent',

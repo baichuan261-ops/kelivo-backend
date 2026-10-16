@@ -5,6 +5,18 @@ const path = require('node:path');
 const { toolPrinciple, timePrinciple } = require('../conversation-principles');
 const { buildHeartbeatMessages } = require('../proactive-core');
 
+test('push history distinguishes delivery and does not treat silence as rejection', () => {
+  const result = buildHeartbeatMessages({rows:[], memories:[], nowText:'now', characterName:'Silas', recentPushes:[
+    {content:'历史未确认',source:'proactive',created_at:'2026-10-15T00:00:00Z'},
+    {content:'已投递内容',source:'proactive_sent',created_at:'2026-10-16T00:00:00Z'}
+  ]});
+  assert.ok(result[0].content.includes('历史生成记录，是否投递未知'));
+  assert.ok(result[0].content.includes('推送服务已接受，用户是否读过未知'));
+  assert.ok(result[0].content.includes('不能单独作为持续不发送的理由'));
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.ok(source.includes("source: 'in.(proactive,proactive_sent)'"));
+});
+
 test('chat includes approved principles without old restrictive tool rule', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.ok(source.includes("require('./conversation-principles')"));
