@@ -1,4 +1,5 @@
 'use strict';
+const { timePrinciple } = require('./conversation-principles');
 
 function cleanText(value) {
   if (typeof value === 'string') return value.trim();
@@ -129,6 +130,7 @@ function buildHeartbeatMessages({ rows, memories, nowText, characterName }) {
         '只输出严格 JSON，不要 Markdown：' +
         '{"send":true或false,"title":"通知标题","message":"要发的话","reason":"简短内部理由"}。' +
         `当前时间：${nowText}。` +
+        '\n【时间流逝】\n' + timePrinciple + '\n' +
         (memoryText ? `\n长期记忆（仅作事实背景）：\n${memoryText}` : '')
     },
     ...history
