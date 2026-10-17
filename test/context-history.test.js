@@ -17,7 +17,7 @@ test('chat keeps newly stated and changed locations beyond the database row cap'
   const prompts = [];
   const queries = [];
   const sandbox = {
-    require(name) { return name === 'express' ? express : require('../deepseek-compat'); },
+    require(name) { return name === 'express' ? express : require(name.startsWith('./') ? '../' + name.slice(2) : name); },
     process: { env: { SUPABASE_URL: 'https://db.test', SUPABASE_KEY: 'test', CLIENT_API_KEY: 'test', TRANSFER_API_URL: 'https://model.test/chat', TRANSFER_API_KEY: 'test' } },
     console: { log() {} }, Buffer, URL, URLSearchParams, AbortSignal, AbortController,
     setTimeout, clearTimeout,

@@ -1,4 +1,5 @@
 const express = require('express');
+const { normalizeToolsForModel } = require('./tool-schema-compat');
 const {
     buildAssistantMessage,
     hasAssistantOutput,
@@ -2797,7 +2798,7 @@ const hasToolContext =
 
                     tools:
                         !disableTools && modelTools.length > 0
-                            ? modelTools
+                            ? normalizeToolsForModel(modelTools, effectiveModel)
                             : undefined,
 
                     tool_choice:
